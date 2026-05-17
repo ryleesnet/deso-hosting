@@ -1,26 +1,90 @@
 @import "tailwindcss";
 
+/*
+  Pointer cursor on real controls. Tailwind v4 layers can reorder unlayered rules;
+  keep these in @layer base and use !important so they reliably beat late resets.
+*/
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled):not([aria-disabled="true"]),
+  input[type="submit"]:not(:disabled),
+  input[type="button"]:not(:disabled),
+  input[type="reset"]:not(:disabled),
+  ::file-selector-button {
+    cursor: pointer !important;
+  }
+
+  button:disabled,
+  button[disabled],
+  input[type="submit"]:disabled,
+  input[type="button"]:disabled,
+  input[type="reset"]:disabled {
+    cursor: default !important;
+    user-select: none;
+    pointer-events: none !important;
+  }
+
+  button[aria-disabled="true"],
+  [role="button"][aria-disabled="true"] {
+    cursor: default !important;
+    user-select: none;
+    pointer-events: none !important;
+  }
+
+  [aria-disabled="true"] {
+    cursor: default !important;
+    user-select: none;
+  }
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0f;
+  --foreground: #e4e4e7;
+  --accent: #00d4aa;
+  --accent-muted: #00a884;
+  --card: #12121a;
+  --card-border: #1e1e2e;
+  --muted: #71717a;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-accent-muted: var(--accent-muted);
+  --color-card: var(--card);
+  --color-card-border: var(--card-border);
+  --color-muted: var(--muted);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), system-ui, sans-serif;
+  min-height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--card);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--card-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
