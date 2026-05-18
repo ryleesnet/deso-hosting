@@ -3,6 +3,7 @@ import {
   getOrdersByUser,
   getOrders,
   getSubscriptions,
+  getSubscriptionsByUser,
 } from "@/lib/db";
 import { daysRemainingInBillingCycle } from "@/lib/billing";
 import type { Order, Subscription } from "@/lib/db";
@@ -39,7 +40,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });
   }
 
-  const subs = await getSubscriptions();
+  const subs = wantAll
+    ? await getSubscriptions()
+    : await getSubscriptionsByUser(auth.publicKey);
   const subByOrderId = new Map(subs.map((s) => [s.orderId, s]));
 
   const orders = wantAll

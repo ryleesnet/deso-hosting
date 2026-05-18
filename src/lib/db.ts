@@ -84,14 +84,27 @@ function forFirestore(obj: object): Record<string, unknown> {
   return JSON.parse(JSON.stringify(obj)) as Record<string, unknown>;
 }
 
-// Services
+// Services (short TTL cache: catalog is small and changes rarely; cuts repeated reads from dashboard polling, etc.)
+
+let servicesCache: { at: number; data: VPSService[] } | null = null;
+const SERVICES_CACHE_MS = 60_000;
+
+function invalidateServicesCache() {
+  servicesCache = null;
+}
 
 export async function getServices(): Promise<VPSService[]> {
+  const now = Date.now();
+  if (servicesCache && now - servicesCache.at < SERVICES_CACHE_MS) {
+    return servicesCache.data;
+  }
   const snap = await db().collection(COL_SERVICES).get();
   const list = snap.docs.map(
     (d) => ({ id: d.id, ...d.data() }) as VPSService
   );
-  return list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+  const sorted = list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+  servicesCache = { at: now, data: sorted };
+  return sorted;
 }
 
 export async function getService(id: string): Promise<VPSService | undefined> {
@@ -112,6 +125,7 @@ export async function addService(
     .collection(COL_SERVICES)
     .doc(newService.id)
     .set(forFirestore(newService));
+  invalidateServicesCache();
   return newService;
 }
 
@@ -125,11 +139,13 @@ export async function updateService(
   const merged = { ...cur.data(), ...updates };
   await ref.set(forFirestore(merged), { merge: true });
   const after = await ref.get();
+  invalidateServicesCache();
   return { id: after.id, ...after.data() } as VPSService;
 }
 
 export async function deleteService(id: string): Promise<void> {
   await db().collection(COL_SERVICES).doc(id).delete();
+  invalidateServicesCache();
 }
 
 // Orders
@@ -189,6 +205,17 @@ export async function updateOrder(
 
 export async function getSubscriptions(): Promise<Subscription[]> {
   const snap = await db().collection(COL_SUBSCRIPTIONS).get();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Subscription);
+}
+
+/** All subscriptions for a user (dashboard / billing); avoids reading every subscription in the project. */
+export async function getSubscriptionsByUser(
+  userId: string
+): Promise<Subscription[]> {
+  const snap = await db()
+    .collection(COL_SUBSCRIPTIONS)
+    .where("userId", "==", userId)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Subscription);
 }
 

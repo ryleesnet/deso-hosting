@@ -91,6 +91,24 @@ export default function DashboardPage() {
     }
   }
 
+  const loadOrdersOnly = useCallback(() => {
+    if (!user) return;
+    apiFetch(`/api/orders`)
+      .then((r) => r.json())
+      .then((ordersData) => {
+        const list = Array.isArray(ordersData) ? ordersData : [];
+        setOrders(
+          list.map((o: Order & { billing?: BillingInfo | null }) => ({
+            ...o,
+            billing: o.billing ?? null,
+          }))
+        );
+      })
+      .catch((err) => {
+        console.error("[dashboard] loadOrdersOnly failed", err);
+      });
+  }, [user]);
+
   const loadData = useCallback(() => {
     if (!user) return;
     Promise.all([
@@ -125,9 +143,9 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!user || !hasProvisioningOrder) return;
-    const t = setInterval(() => loadData(), 3000);
+    const t = setInterval(() => loadOrdersOnly(), 3000);
     return () => clearInterval(t);
-  }, [user, hasProvisioningOrder, loadData]);
+  }, [user, hasProvisioningOrder, loadOrdersOnly]);
 
   if (!user) {
     return (
