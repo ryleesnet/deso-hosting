@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
@@ -19,6 +19,13 @@ export const metadata: Metadata = {
   description: "VPS hosting - Pay with DeSo, control your servers",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0a0a0f",
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -31,7 +38,9 @@ export default function RootLayout({
       >
         <AuthProvider>
           <Header />
-          <main className="min-h-[calc(100vh-64px)]">{children}</main>
+          <main className="min-h-[calc(100dvh-7rem)] pb-[max(1rem,env(safe-area-inset-bottom))] md:min-h-[calc(100dvh-4rem)] md:pb-0">
+            {children}
+          </main>
         </AuthProvider>
       </body>
     </html>

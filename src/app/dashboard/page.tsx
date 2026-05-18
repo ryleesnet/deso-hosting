@@ -167,8 +167,8 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
-      <h1 className="text-3xl font-bold">My VPS</h1>
+    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-16 lg:px-8">
+      <h1 className="text-2xl font-bold sm:text-3xl">My VPS</h1>
       <p className="mt-2 text-[var(--muted)]">
         Manage your virtual private servers
       </p>
@@ -195,16 +195,16 @@ export default function DashboardPage() {
             .map((order) => (
             <div
               key={order.id}
-              className="rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6"
+              className="rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-4 sm:p-6"
             >
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <h3 className="text-xl font-semibold">
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3 sm:gap-y-1">
+                  <h3 className="break-words text-lg font-semibold sm:text-xl">
                     <VMProxmoxTitle orderId={order.id} vmid={order.vmid} />
                   </h3>
                 {order.status === "provisioning" && (
                   <>
                     <span
-                      className="text-lg font-semibold text-[var(--muted)] select-none"
+                      className="hidden text-lg font-semibold text-[var(--muted)] select-none sm:inline"
                       aria-hidden
                     >
                       |
@@ -221,7 +221,7 @@ export default function DashboardPage() {
                 {order.status === "suspended" && (
                   <>
                     <span
-                      className="text-lg font-semibold text-[var(--muted)] select-none"
+                      className="hidden text-lg font-semibold text-[var(--muted)] select-none sm:inline"
                       aria-hidden
                     >
                       |
@@ -235,12 +235,12 @@ export default function DashboardPage() {
                   order.vmid > 0 && (
                   <>
                     <span
-                      className="text-lg font-semibold text-[var(--muted)] select-none"
+                      className="hidden text-lg font-semibold text-[var(--muted)] select-none sm:inline"
                       aria-hidden
                     >
                       |
                     </span>
-                    <div className="flex items-center gap-2 text-lg font-semibold">
+                    <div className="flex flex-col gap-1 text-base font-semibold sm:flex-row sm:items-center sm:gap-2 sm:text-lg">
                       <span className="text-[var(--muted)]">Status:</span>
                       <VMRunningStatus
                         orderId={order.id}

@@ -33,7 +33,7 @@ export default function ServicesPage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-7xl px-4 py-16">
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-16 lg:px-8">
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {[1, 2, 3].map((i) => (
             <div
@@ -47,8 +47,8 @@ export default function ServicesPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
-      <h1 className="text-3xl font-bold">VPS Plans</h1>
+    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-16 lg:px-8">
+      <h1 className="text-2xl font-bold sm:text-3xl">VPS Plans</h1>
       <p className="mt-2 text-[var(--muted)]">
         Prices are listed in USD. Checkout converts to DeSo at the live rate.
       </p>

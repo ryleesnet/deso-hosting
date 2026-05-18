@@ -6,35 +6,35 @@ export default function Home() {
       {/* Background gradient */}
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(0,212,170,0.15),transparent)]" />
 
-      <section className="mx-auto max-w-7xl px-4 py-24 sm:px-6 lg:px-8">
+      <section className="mx-auto max-w-7xl px-4 py-12 sm:px-6 sm:py-24 lg:px-8">
         <div className="text-center">
-          <h1 className="text-5xl font-bold tracking-tight sm:text-6xl lg:text-7xl">
+          <h1 className="text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl lg:text-7xl">
             <span className="bg-gradient-to-r from-[var(--accent)] via-[var(--accent-muted)] to-[var(--accent)] bg-clip-text text-transparent">
               DeSoHosting
             </span>
           </h1>
-          <p className="mx-auto mt-6 max-w-2xl text-lg text-[var(--muted)]">
+          <p className="mx-auto mt-5 max-w-2xl px-1 text-base leading-relaxed text-[var(--muted)] sm:mt-6 sm:text-lg">
             VPS hosting powered by DeSo. Plans are priced in USD;
             checkout converts to DeSo at a live rate. Pay with your DeSo account
             and control your servers from anywhere—no credit cards required.
           </p>
-          <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
+          <div className="mt-8 flex w-full max-w-md flex-col items-stretch gap-3 px-2 sm:mx-auto sm:mt-10 sm:max-w-none sm:flex-row sm:items-center sm:justify-center sm:gap-4 sm:px-0">
             <Link
               href="/services"
-              className="rounded-xl bg-[var(--accent)] px-8 py-4 text-lg font-semibold text-[var(--background)] transition hover:bg-[var(--accent-muted)]"
+              className="inline-flex min-h-12 items-center justify-center rounded-xl bg-[var(--accent)] px-6 py-3 text-base font-semibold text-[var(--background)] transition hover:bg-[var(--accent-muted)] sm:px-8 sm:py-4 sm:text-lg"
             >
               View Plans
             </Link>
             <Link
               href="/dashboard"
-              className="rounded-xl border border-[var(--card-border)] px-8 py-4 text-lg font-semibold transition hover:bg-[var(--card)]"
+              className="inline-flex min-h-12 items-center justify-center rounded-xl border border-[var(--card-border)] px-6 py-3 text-base font-semibold transition hover:bg-[var(--card)] sm:px-8 sm:py-4 sm:text-lg"
             >
               Dashboard
             </Link>
           </div>
         </div>
 
-        <div className="mt-24 grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-16 grid gap-6 sm:mt-24 sm:grid-cols-2 lg:grid-cols-3">
           {[
             {
               title: "DeSo Login",

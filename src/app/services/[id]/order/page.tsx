@@ -272,7 +272,7 @@ export default function OrderPage() {
       : null);
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-16">
+    <div className="mx-auto max-w-2xl px-4 py-8 sm:py-16">
       {orderKeyBundle && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-[1px]"
@@ -358,13 +358,13 @@ export default function OrderPage() {
           </div>
         </div>
       )}
-      <h1 className="text-2xl font-bold">Complete Order</h1>
-      <div className="mt-6 rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6">
-        <h3 className="text-xl font-semibold">{service.name}</h3>
-        <p className="mt-2 text-[var(--muted)]">{service.description}</p>
-        <div className="mt-4 flex justify-between text-sm">
-          <span>{service.vcpu} vCPU · {service.ram / 1024} GB Memory · {service.storage} GB</span>
-          <span className="font-semibold text-[var(--accent)]">{totalUsdLine}/mo</span>
+      <h1 className="text-xl font-bold sm:text-2xl">Complete Order</h1>
+      <div className="mt-6 rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-4 sm:p-6">
+        <h3 className="text-lg font-semibold sm:text-xl">{service.name}</h3>
+        <p className="mt-2 text-sm text-[var(--muted)] sm:text-base">{service.description}</p>
+        <div className="mt-4 flex flex-col gap-2 text-sm sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+          <span className="min-w-0 text-[var(--muted)]">{service.vcpu} vCPU · {service.ram / 1024} GB Memory · {service.storage} GB</span>
+          <span className="shrink-0 font-semibold text-[var(--accent)]">{totalUsdLine}/mo</span>
         </div>
 
         <div className="mt-6 rounded-xl border border-[var(--card-border)] bg-[var(--background)]/50 p-4">

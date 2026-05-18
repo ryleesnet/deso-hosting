@@ -64,7 +64,7 @@ function UserMenu({
     <div className="relative shrink-0" ref={rootRef}>
       <button
         type="button"
-        className={`flex max-w-full items-center gap-2 py-1.5 pl-1.5 pr-2.5 text-left ${HEADER_PILL_SHELL}`}
+        className={`flex min-h-10 max-w-full items-center gap-2 py-1.5 pl-1.5 pr-2.5 text-left ${HEADER_PILL_SHELL}`}
         aria-expanded={open}
         aria-haspopup="menu"
         aria-controls={menuId}
@@ -179,9 +179,9 @@ function HeaderDesoPrice() {
   if (!desoFormatted) return null;
 
   return (
-    <div className="flex max-w-full min-w-0 flex-wrap items-center justify-end gap-2 sm:flex-nowrap">
+    <div className="flex max-w-full min-w-0 flex-wrap items-center justify-end gap-1 sm:gap-2 md:flex-nowrap">
       <span
-        className={`inline-flex max-w-full shrink-0 items-center text-[var(--muted)] ${HEADER_PILL_SHELL}`}
+        className={`inline-flex max-w-[min(calc(100vw-8rem),15rem)] min-w-0 shrink-0 items-center text-[var(--muted)] sm:max-w-none ${HEADER_PILL_SHELL}`}
         title="Approximate USD price for 1 DESO (from your DeSo node)"
       >
         <span className="font-medium text-[var(--foreground)]">DESO</span>
@@ -206,12 +206,12 @@ export function Header() {
     : null;
 
   return (
-    <header className="sticky top-0 z-50 overflow-visible border-b border-[var(--card-border)] bg-[var(--background)]/95 backdrop-blur">
-      <div className="mx-auto grid h-16 max-w-7xl grid-cols-[1fr_auto_1fr] items-center gap-2 px-4 sm:px-6 lg:px-8">
-        <div className="flex min-w-0 justify-start">
+    <header className="sticky top-0 z-50 overflow-visible border-b border-[var(--card-border)] bg-[var(--background)]/95 pt-[env(safe-area-inset-top)] backdrop-blur">
+      <div className="mx-auto grid max-w-7xl grid-cols-[minmax(0,1fr)_auto] grid-rows-[auto_auto] items-center gap-x-2 gap-y-3 px-3 pb-3 sm:px-6 md:h-16 md:grid-cols-[1fr_auto_1fr] md:grid-rows-1 md:gap-x-2 md:gap-y-0 md:px-6 md:py-0 lg:px-8">
+        <div className="justify-self-start md:col-start-1 md:row-start-1">
           <Link
             href="/"
-            className="flex items-center gap-2 text-xl font-bold tracking-tight"
+            className="flex min-w-0 items-center gap-2 text-lg font-bold tracking-tight sm:text-xl"
           >
             <span className="bg-gradient-to-r from-[var(--accent)] to-[var(--accent-muted)] bg-clip-text text-transparent">
               DeSoHosting
@@ -219,30 +219,10 @@ export function Header() {
           </Link>
         </div>
 
-        <nav
-          className="flex flex-wrap items-center justify-center gap-2 sm:gap-2"
-          aria-label="Main"
-        >
-          {user && (
-            <Link
-              href="/dashboard"
-              className={`inline-flex max-w-full shrink-0 items-center justify-center font-medium text-[var(--foreground)] ${HEADER_PILL_SHELL}`}
-            >
-              Dashboard
-            </Link>
-          )}
-          <Link
-            href="/services"
-            className={`inline-flex max-w-full shrink-0 items-center justify-center font-medium text-[var(--foreground)] ${HEADER_PILL_SHELL}`}
-          >
-            New VM
-          </Link>
-        </nav>
-
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
+        <div className="col-start-2 row-start-1 flex min-w-0 flex-shrink-0 flex-wrap items-center justify-end gap-1.5 sm:gap-2 md:col-start-3 md:row-start-1 md:justify-end md:pl-2">
           <HeaderDesoPrice />
           {loading ? (
-            <div className="h-10 w-24 shrink-0 animate-pulse rounded-xl bg-[var(--card)]" />
+            <div className="h-10 w-20 shrink-0 animate-pulse rounded-xl bg-[var(--card)] sm:w-24" />
           ) : user && picUrl ? (
             <UserMenu
               picUrl={picUrl}
@@ -255,12 +235,32 @@ export function Header() {
             <button
               type="button"
               onClick={login}
-              className={`inline-flex max-w-full shrink-0 items-center justify-center font-medium text-[var(--foreground)] ${HEADER_PILL_SHELL}`}
+              className={`inline-flex max-w-[min(100%,11rem)] shrink-0 items-center justify-center text-center font-medium text-[var(--foreground)] ${HEADER_PILL_SHELL} px-2.5 py-2 text-xs sm:max-w-none sm:px-3 sm:text-sm`}
             >
               Login with DeSo
             </button>
           )}
         </div>
+
+        <nav
+          className="col-span-2 row-start-2 flex flex-wrap items-center justify-center gap-2 sm:gap-2 md:col-span-1 md:col-start-2 md:row-start-1 md:w-auto"
+          aria-label="Main"
+        >
+          {user && (
+            <Link
+              href="/dashboard"
+              className={`inline-flex min-h-10 min-w-0 max-w-full shrink-0 items-center justify-center px-3 py-2 text-sm font-medium text-[var(--foreground)] ${HEADER_PILL_SHELL}`}
+            >
+              Dashboard
+            </Link>
+          )}
+          <Link
+            href="/services"
+            className={`inline-flex min-h-10 min-w-0 max-w-full shrink-0 items-center justify-center px-3 py-2 text-sm font-medium text-[var(--foreground)] ${HEADER_PILL_SHELL}`}
+          >
+            New VM
+          </Link>
+        </nav>
       </div>
     </header>
   );

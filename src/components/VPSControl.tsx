@@ -227,14 +227,14 @@ function VmPowerMenu({
           id={menuId}
           role="menu"
           aria-label={menuAriaLabel}
-          className="absolute left-0 z-[60] mt-1 min-w-[13rem] rounded-lg border border-[var(--card-border)] bg-[var(--card)] py-1 shadow-lg"
+          className="absolute left-0 z-[60] mt-1 max-w-[min(20rem,calc(100vw-1.5rem))] min-w-[12rem] rounded-lg border border-[var(--card-border)] bg-[var(--card)] py-1 shadow-lg sm:left-0"
         >
           {items.map(({ label, destructive, destructiveTone, onSelect }) => (
             <button
               key={label}
               type="button"
               role="menuitem"
-              className={`block w-full px-3 py-2 text-left text-sm hover:bg-[var(--background)] ${
+              className={`block min-h-10 w-full px-3 py-2 text-left text-sm hover:bg-[var(--background)] sm:min-h-0 ${
                 destructive
                   ? destructiveTone === "red"
                     ? "text-red-400 hover:text-red-300"

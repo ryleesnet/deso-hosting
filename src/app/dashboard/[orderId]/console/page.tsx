@@ -36,15 +36,17 @@ export default function ConsolePage() {
   if (!user) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black">
-      <div className="flex items-center justify-between border-b border-[var(--card-border)] bg-[var(--card)] px-4 py-2">
+    <div className="fixed inset-0 z-50 flex flex-col bg-black pt-[env(safe-area-inset-top)]">
+      <div className="flex min-h-11 items-center justify-between gap-2 border-b border-[var(--card-border)] bg-[var(--card)] px-3 py-2 sm:px-4">
         <Link
           href="/dashboard"
-          className="text-sm text-[var(--accent)] hover:underline"
+          className="min-w-0 shrink text-sm text-[var(--accent)] hover:underline"
         >
-          ← Back to Dashboard
+          ← Dashboard
         </Link>
-        <span className="text-sm text-[var(--muted)]">VNC Console</span>
+        <span className="truncate text-center text-xs text-[var(--muted)] sm:text-sm">
+          VNC Console
+        </span>
       </div>
       {user && (
         <VNCViewer
