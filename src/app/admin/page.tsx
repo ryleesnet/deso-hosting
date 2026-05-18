@@ -277,6 +277,8 @@ export default function AdminPage() {
       setServices(Array.isArray(svc) ? svc : []);
       setOrders(Array.isArray(ord) ? ord : []);
       setPublicIps(ips as PublicIpRecord[]);
+    }).catch((err) => {
+      console.error("[admin] loadData failed", err);
     }).finally(() => setLoading(false));
   }
 

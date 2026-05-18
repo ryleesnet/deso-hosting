@@ -4,9 +4,11 @@ import React, {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useState,
   useCallback,
 } from "react";
+import { useRouter } from "next/navigation";
 import {
   initDeSo,
   loginWithDeSo,
@@ -14,8 +16,9 @@ import {
   getCurrentUser,
   getRememberedSessionDesoUsername,
   rememberSessionDesoUsername,
+  fetchClientDesoUsername,
 } from "@/lib/deso";
-import { clearJwtCache } from "@/lib/api-client";
+import { clearJwtCache, setApiSessionPublicKey } from "@/lib/api-client";
 
 interface AuthContextType {
   user: { publicKey: string; username?: string } | null;
@@ -33,16 +36,23 @@ const ADMIN_KEYS = (process.env.NEXT_PUBLIC_ADMIN_PUBLIC_KEYS || "")
   .filter(Boolean);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
   const [user, setUser] = useState<{
     publicKey: string;
     username?: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
 
+  /** Runs before child `useEffect` so `apiFetch` sees the correct pubkey on first load after login. */
+  useLayoutEffect(() => {
+    setApiSessionPublicKey(user?.publicKey ?? null);
+  }, [user?.publicKey]);
+
   useEffect(() => {
     initDeSo();
     const u = getCurrentUser();
     const remembered = getRememberedSessionDesoUsername();
+    setApiSessionPublicKey(u?.publicKey ?? null);
     setUser(u ? { ...u, username: remembered } : null);
     setLoading(false);
 
@@ -51,20 +61,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch("/api/profile/username", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ publicKey: u.publicKey }),
-        });
-        const data = (await res.json()) as { username?: string | null };
+        const username = await fetchClientDesoUsername(u.publicKey);
         if (
           cancelled ||
-          typeof data.username !== "string" ||
-          !data.username.trim()
+          typeof username !== "string" ||
+          !username.trim()
         )
           return;
-        const trimmed = data.username.trim();
-        rememberSessionDesoUsername(data.username);
+        const trimmed = username.trim();
+        rememberSessionDesoUsername(trimmed);
         setUser((prev) =>
           prev?.publicKey === u.publicKey
             ? { ...prev, username: trimmed }
@@ -87,17 +92,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const result = await loginWithDeSo();
     if (result) {
       rememberSessionDesoUsername(result.username);
+      setApiSessionPublicKey(result.publicKey);
       setUser({ publicKey: result.publicKey, username: result.username });
+    } else {
+      setApiSessionPublicKey(null);
     }
     setLoading(false);
   }, []);
 
   const logout = useCallback(async () => {
     setLoading(true);
-    await logoutDeSo();
-    setUser(null);
-    setLoading(false);
-  }, []);
+    try {
+      await logoutDeSo();
+    } catch (err) {
+      console.error("DeSo logout failed:", err);
+    } finally {
+      setApiSessionPublicKey(null);
+      setUser(null);
+      router.replace("/");
+      setLoading(false);
+    }
+  }, [router]);
 
   const isAdmin = user ? ADMIN_KEYS.includes(user.publicKey) : false;
 

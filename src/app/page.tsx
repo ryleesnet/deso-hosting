@@ -14,7 +14,7 @@ export default function Home() {
             </span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-[var(--muted)]">
-            Decentralized VPS hosting powered by DeSo. Plans are priced in USD;
+            VPS hosting powered by DeSo. Plans are priced in USD;
             checkout converts to DeSo at a live rate. Pay with your DeSo account
             and control your servers from anywhere—no credit cards required.
           </p>

@@ -14,6 +14,8 @@ import { OrderSpecsSummary } from "@/components/OrderSpecsSummary";
 import { BillingCycleSummary, type BillingInfo } from "@/components/BillingCycleSummary";
 import { VmBootstrapCredentials } from "@/components/VmBootstrapCredentials";
 import { RenewSubscriptionPanel } from "@/components/RenewSubscriptionPanel";
+import { ReinstallVpsButton } from "@/components/ReinstallVpsButton";
+import { PrivateUserLanPanel } from "@/components/PrivateUserLanPanel";
 import { apiFetch } from "@/lib/api-client";
 
 interface Order {
@@ -32,6 +34,9 @@ interface Order {
   provisionError?: string;
   /** authorized_keys lines currently installed via cloud-init (server-side state). */
   cloudInitSshKeys?: string;
+  privateLanEnabled?: boolean;
+  privateLanVlan?: number;
+  privateLanIp?: string;
 }
 
 interface Service {
@@ -105,6 +110,9 @@ export default function DashboardPage() {
           map[s.id] = s;
         });
         setServices(map);
+      })
+      .catch((err) => {
+        console.error("[dashboard] loadData failed", err);
       })
       .finally(() => setLoading(false));
   }, [user]);
@@ -183,12 +191,12 @@ export default function DashboardPage() {
                     >
                       |
                     </span>
-                    <span className="inline-flex items-center gap-2 text-sm font-semibold text-orange-400">
+                    <span className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-orange-400">
                       <span
                         className="inline-block h-2 w-2 animate-pulse rounded-full bg-orange-400"
                         aria-hidden
                       />
-                      Provisioning
+                      PROVISIONING
                     </span>
                   </>
                 )}
@@ -241,6 +249,17 @@ export default function DashboardPage() {
                     plan={services[order.serviceId]}
                   />
                   <BillingCycleSummary billing={order.billing} />
+                  <PrivateUserLanPanel
+                    orderId={order.id}
+                    enabled={order.privateLanEnabled}
+                    ip={order.privateLanIp}
+                    canEdit={
+                      (order.status === "active" ||
+                        order.status === "suspended") &&
+                      order.vmid > 0
+                    }
+                    onChange={loadData}
+                  />
                   {order.billing &&
                     (order.status === "active" || order.status === "suspended") &&
                     order.vmid > 0 && (
@@ -275,23 +294,47 @@ export default function DashboardPage() {
                               });
                             }}
                             deleteButton={
-                              <CancelVpsButton
-                                orderId={order.id}
-                                shouldCheckPower
-                                userPublicKey={user.publicKey}
-                                onSuccess={loadData}
-                              />
+                              <>
+                                <div className="min-w-0">
+                                  <ReinstallVpsButton
+                                    orderId={order.id}
+                                    onStarted={loadData}
+                                    disabled={!!vmPowerPendingByOrder[order.id]}
+                                    fillCell
+                                  />
+                                </div>
+                                <div className="min-w-0">
+                                  <CancelVpsButton
+                                    orderId={order.id}
+                                    shouldCheckPower
+                                    userPublicKey={user.publicKey}
+                                    onSuccess={loadData}
+                                    fillCell
+                                  />
+                                </div>
+                              </>
                             }
                           />
                         ) : (
-                          <CancelVpsButton
-                            orderId={order.id}
-                            shouldCheckPower={
-                              order.status === "active" && order.vmid > 0
-                            }
-                            userPublicKey={user.publicKey}
-                            onSuccess={loadData}
-                          />
+                          <>
+                            {(order.status === "active" ||
+                              order.status === "suspended") &&
+                              order.vmid > 0 && (
+                                <ReinstallVpsButton
+                                  orderId={order.id}
+                                  onStarted={loadData}
+                                  disabled={!!vmPowerPendingByOrder[order.id]}
+                                />
+                              )}
+                            <CancelVpsButton
+                              orderId={order.id}
+                              shouldCheckPower={
+                                order.status === "active" && order.vmid > 0
+                              }
+                              userPublicKey={user.publicKey}
+                              onSuccess={loadData}
+                            />
+                          </>
                         )}
                       </div>
                     </div>

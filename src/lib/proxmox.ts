@@ -532,6 +532,16 @@ export async function applyServiceHardwareToVM(
       sshkeys?: string;
     };
     extraDisksGb?: unknown;
+    /**
+     * Second virtio NIC (typically `net1`) on a VLAN-tagged bridge for private VM-to-VM networking.
+     * Requires a VLAN-aware Proxmox bridge (see PROXMOX_PRIVATE_LAN_BRIDGE).
+     */
+    privateLan?: {
+      ip: string;
+      prefixLen: number;
+      vlanTag: number;
+      bridge?: string;
+    };
   }
 ): Promise<void> {
   const client = await getProxmoxClient();
@@ -552,7 +562,28 @@ export async function applyServiceHardwareToVM(
   const { data: cfgRes } = await client.get(
     `/nodes/${node}/qemu/${vmid}/config`
   );
-  const cfg = cfgRes.data as Record<string, unknown>;
+  let cfg = cfgRes.data as Record<string, unknown>;
+
+  if (!options?.privateLan) {
+    const del: string[] = [];
+    if (typeof cfg.net1 === "string") del.push("net1");
+    if (typeof cfg.ipconfig1 === "string") del.push("ipconfig1");
+    if (del.length > 0) {
+      const body = new URLSearchParams();
+      body.set("delete", del.join(","));
+      await client.post(
+        `/nodes/${node}/qemu/${vmid}/config`,
+        body.toString(),
+        {
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        }
+      );
+      const { data: cfgFresh } = await client.get(
+        `/nodes/${node}/qemu/${vmid}/config`
+      );
+      cfg = cfgFresh.data as Record<string, unknown>;
+    }
+  }
 
   const configParams: Record<string, string> = {
     cores: String(Math.max(1, Math.floor(specs.vcpu))),
@@ -578,6 +609,24 @@ export async function applyServiceHardwareToVM(
     // the cloud-init drive. We must pre-encode here so the post-form-decode value is the
     // percent-encoded form PVE wants. (Without this we get `400 invalid urlencoded string`.)
     configParams.sshkeys = encodeURIComponent(ci.sshkeys.trim());
+  }
+
+  const pl = options?.privateLan;
+  if (
+    pl &&
+    pl.ip?.trim() &&
+    Number.isInteger(pl.prefixLen) &&
+    pl.prefixLen > 0 &&
+    Number.isInteger(pl.vlanTag) &&
+    pl.vlanTag >= 1 &&
+    pl.vlanTag <= 4094
+  ) {
+    const bridge =
+      pl.bridge?.trim() ||
+      process.env.PROXMOX_PRIVATE_LAN_BRIDGE?.trim() ||
+      "vmbr0";
+    configParams.net1 = `virtio,bridge=${bridge},tag=${pl.vlanTag}`;
+    configParams.ipconfig1 = `ip=${pl.ip.trim()}/${pl.prefixLen}`;
   }
 
   await client.post(
@@ -631,7 +680,8 @@ export async function applyServiceHardwareToVM(
   const needCiDrive =
     Boolean(ci?.ciuser && ci?.cipassword) ||
     Boolean(ci?.network?.ip) ||
-    Boolean(ci?.sshkeys?.trim());
+    Boolean(ci?.sshkeys?.trim()) ||
+    Boolean(options?.privateLan?.ip?.trim());
   if (needCiDrive) {
     await regenerateCloudInitDrive(client, node, vmid);
   }
@@ -808,6 +858,66 @@ export async function resetVM(node: string, vmid: number): Promise<void> {
 export async function destroyVM(node: string, vmid: number): Promise<void> {
   const client = await getProxmoxClient();
   await client.delete(`/nodes/${node}/qemu/${vmid}`);
+}
+
+/**
+ * Remove the private-LAN virtio NIC (`net1`) and cloud-init `ipconfig1`, then regenerate
+ * cloud-init when other CI fields exist. Restarts the VM if it was running.
+ */
+export async function removePrivateLanFromVM(
+  node: string,
+  vmid: number
+): Promise<void> {
+  const client = await getProxmoxClient();
+
+  let wasRunning = false;
+  try {
+    const { data } = await client.get(
+      `/nodes/${node}/qemu/${vmid}/status/current`
+    );
+    const status = data.data?.status as string | undefined;
+    wasRunning = status === "running" || status === "paused";
+  } catch {
+    /* treat as stopped */
+  }
+
+  if (wasRunning) {
+    await stopVM(node, vmid);
+    await waitUntilVmStopped(client, node, vmid);
+  }
+
+  const { data: cfgRes } = await client.get(
+    `/nodes/${node}/qemu/${vmid}/config`
+  );
+  const cfg = cfgRes.data as Record<string, unknown>;
+
+  const del: string[] = [];
+  if (typeof cfg.net1 === "string") del.push("net1");
+  if (typeof cfg.ipconfig1 === "string") del.push("ipconfig1");
+
+  if (del.length > 0) {
+    const body = new URLSearchParams();
+    body.set("delete", del.join(","));
+    await client.post(
+      `/nodes/${node}/qemu/${vmid}/config`,
+      body.toString(),
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }
+    );
+  }
+
+  const needRegen =
+    Boolean(cfg.ciuser) ||
+    Boolean(cfg.ipconfig0) ||
+    Boolean(cfg.sshkeys);
+  if (needRegen) {
+    await regenerateCloudInitDrive(client, node, vmid);
+  }
+
+  if (wasRunning) {
+    await startVM(node, vmid);
+  }
 }
 
 /** Update guest display name in Proxmox (QEMU config `name`). */

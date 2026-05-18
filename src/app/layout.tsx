@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "DeSoHosting | VPS Hosting on DeSo",
-  description: "Decentralized VPS hosting - Pay with DeSo, control your servers",
+  description: "VPS hosting - Pay with DeSo, control your servers",
 };
 
 export default function RootLayout({

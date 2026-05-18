@@ -1,6 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useId,
+  type ReactNode,
+} from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api-client";
@@ -128,13 +135,133 @@ async function pollAfterForceReset(
   return false;
 }
 
+type VmPowerMenuItem = {
+  label: string;
+  destructive?: boolean;
+  destructiveTone?: "orange" | "red";
+  onSelect: () => void;
+};
+
+function VmPowerMenu({
+  idleLabel,
+  loadingLabel,
+  isLoading,
+  disabled,
+  disabledTitle,
+  triggerClassName,
+  menuAriaLabel,
+  items,
+}: {
+  idleLabel: string;
+  loadingLabel: string;
+  isLoading: boolean;
+  disabled: boolean;
+  disabledTitle?: string;
+  triggerClassName: string;
+  menuAriaLabel: string;
+  items: VmPowerMenuItem[];
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+
+  const close = useCallback(() => setOpen(false), []);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onPointerDown = (e: PointerEvent) => {
+      const el = rootRef.current;
+      if (el && !el.contains(e.target as Node)) close();
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, close]);
+
+  return (
+    <div className="relative inline-block align-top" ref={rootRef}>
+      <button
+        type="button"
+        className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50 ${triggerClassName} ${
+          isLoading ? "animate-pulse" : ""
+        }`}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-controls={menuId}
+        disabled={disabled}
+        title={disabled ? disabledTitle : `Open ${idleLabel} options`}
+        onClick={() => {
+          if (disabled) return;
+          setOpen((prev) => !prev);
+        }}
+      >
+        <span>{isLoading ? loadingLabel : idleLabel}</span>
+        <svg
+          className={`h-4 w-4 shrink-0 opacity-80 transition-transform ${open ? "rotate-180" : ""}`}
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden
+        >
+          <path
+            fillRule="evenodd"
+            d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+            clipRule="evenodd"
+          />
+        </svg>
+      </button>
+      {open && !disabled ? (
+        <div
+          id={menuId}
+          role="menu"
+          aria-label={menuAriaLabel}
+          className="absolute left-0 z-[60] mt-1 min-w-[13rem] rounded-lg border border-[var(--card-border)] bg-[var(--card)] py-1 shadow-lg"
+        >
+          {items.map(({ label, destructive, destructiveTone, onSelect }) => (
+            <button
+              key={label}
+              type="button"
+              role="menuitem"
+              className={`block w-full px-3 py-2 text-left text-sm hover:bg-[var(--background)] ${
+                destructive
+                  ? destructiveTone === "red"
+                    ? "text-red-400 hover:text-red-300"
+                    : "text-orange-400 hover:text-orange-300"
+                  : "text-[var(--foreground)]"
+              }`}
+              onClick={() => {
+                close();
+                onSelect();
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function VPSControl({
   orderId,
   deleteButton,
   onPowerFlowPending,
 }: {
   orderId: string;
-  /** Rendered after power buttons on the first row (e.g. Delete subscription). */
+  /** Two grid cells (e.g. Reinstall + Delete), equal width inside {@link VPSControl}. */
   deleteButton?: ReactNode;
   /**
    * Set when a power action begins (`action`). On API/timeout failure pass `null`.
@@ -234,7 +361,16 @@ export function VPSControl({
   const offHint = "VM is off — start it first";
 
   const linkBase =
-    "inline-flex rounded-lg border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)]";
+    "flex w-full items-center justify-center rounded-lg border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)]";
+
+  const powerMenusDisabled = loading !== null || !isRunning;
+
+  const powerMenuDisabledTitle =
+    !isRunning
+      ? offHint
+      : loading !== null
+        ? "Please wait for the current operation"
+        : undefined;
 
   function btnOpacityWhen(actionName: Action) {
     return loading === actionName ? "" : "disabled:opacity-50";
@@ -246,98 +382,103 @@ export function VPSControl({
 
   return (
     <>
-      <div className="flex flex-wrap items-center gap-2">
-      <button
-        type="button"
-        onClick={() => runAction("start")}
-        disabled={loading !== null || isRunning}
-        title={isRunning ? "VM is already running" : undefined}
-        className={`rounded-lg bg-green-600/20 px-3 py-1.5 text-sm text-green-400 hover:bg-green-600/30 disabled:cursor-not-allowed ${btnPulseWhen(
-          "start"
-        )} ${btnOpacityWhen("start")}`}
-      >
-        {loading === "start" ? LOADING_BUTTON_LABEL.start : "Start"}
-      </button>
-      <button
-        type="button"
-        onClick={() => runAction("reboot")}
-        disabled={loading !== null || !isRunning}
-        title={!isRunning ? offHint : undefined}
-        className={`rounded-lg bg-blue-600/20 px-3 py-1.5 text-sm text-blue-400 hover:bg-blue-600/30 disabled:cursor-not-allowed ${btnPulseWhen(
-          "reboot"
-        )} ${btnOpacityWhen("reboot")}`}
-      >
-        {loading === "reboot" ? LOADING_BUTTON_LABEL.reboot : "Restart"}
-      </button>
-      <button
-        type="button"
-        onClick={() => runAction("shutdown")}
-        disabled={loading !== null || !isRunning}
-        title={!isRunning ? offHint : undefined}
-        className={`rounded-lg bg-yellow-600/20 px-3 py-1.5 text-sm text-yellow-400 hover:bg-yellow-600/30 disabled:cursor-not-allowed ${btnPulseWhen(
-          "shutdown"
-        )} ${btnOpacityWhen("shutdown")}`}
-      >
-        {loading === "shutdown"
-          ? LOADING_BUTTON_LABEL.shutdown
-          : "Shutdown"}
-      </button>
-      <button
-        type="button"
-        onClick={() => forceShutdownDialogRef.current?.showModal()}
-        disabled={loading !== null || !isRunning}
-        title={
-          !isRunning
-            ? offHint
-            : "Immediate power off — does not wait for the guest OS"
-        }
-        className={`rounded-lg bg-red-600/20 px-3 py-1.5 text-sm text-red-400 hover:bg-red-600/30 disabled:cursor-not-allowed ${btnPulseWhen(
-          "force_shutdown"
-        )} ${btnOpacityWhen("force_shutdown")}`}
-      >
-        {loading === "force_shutdown"
-          ? LOADING_BUTTON_LABEL.force_shutdown
-          : "Force Shutdown"}
-      </button>
-      <button
-        type="button"
-        onClick={() => forceRestartDialogRef.current?.showModal()}
-        disabled={loading !== null || !isRunning}
-        title={
-          !isRunning
-            ? offHint
-            : "Hardware reset — does not shut down the guest cleanly"
-        }
-        className={`rounded-lg bg-orange-600/20 px-3 py-1.5 text-sm text-orange-400 hover:bg-orange-600/30 disabled:cursor-not-allowed ${btnPulseWhen(
-          "reset"
-        )} ${btnOpacityWhen("reset")}`}
-      >
-        {loading === "reset" ? LOADING_BUTTON_LABEL.reset : "Force Restart"}
-      </button>
-      {deleteButton}
-      <span className="h-0 w-full basis-full shrink-0" aria-hidden />
-      {isRunning ? (
-        <Link
-          href={`/dashboard/${orderId}/console`}
-          className={`${linkBase} hover:bg-[var(--accent)]/10`}
-        >
-          Console
-        </Link>
-      ) : (
-        <button
-          type="button"
-          disabled
-          title={offHint}
-          className={`${linkBase} bg-transparent disabled:opacity-50`}
-        >
-          Console
-        </button>
-      )}
-      {actionError && (
-        <p className="w-full basis-full text-sm text-red-400" role="alert">
-          {actionError}
-        </p>
-      )}
+      <div className="flex flex-col gap-2">
+        <div className="grid w-max max-w-full grid-cols-1 gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => runAction("start")}
+            disabled={loading !== null || isRunning}
+            title={isRunning ? "VM is already running" : undefined}
+            className={`rounded-lg bg-green-600/20 px-3 py-1.5 text-sm text-green-400 hover:bg-green-600/30 disabled:cursor-not-allowed ${btnPulseWhen(
+              "start"
+            )} ${btnOpacityWhen("start")}`}
+          >
+            {loading === "start" ? LOADING_BUTTON_LABEL.start : "Start"}
+          </button>
+          <VmPowerMenu
+            idleLabel="Restart"
+            loadingLabel={
+              loading === "reset"
+                ? LOADING_BUTTON_LABEL.reset
+                : LOADING_BUTTON_LABEL.reboot
+            }
+            isLoading={
+              loading === "reboot" ||
+              loading === "reset"
+            }
+            disabled={powerMenusDisabled}
+            disabledTitle={powerMenuDisabledTitle}
+            menuAriaLabel="Restart options"
+            triggerClassName="bg-blue-600/20 text-blue-400 hover:bg-blue-600/30"
+            items={[
+              {
+                label: "Restart (guest)",
+                onSelect: () => void runAction("reboot"),
+              },
+              {
+                label: "Force restart…",
+                destructive: true,
+                onSelect: () =>
+                  forceRestartDialogRef.current?.showModal(),
+              },
+            ]}
+          />
+          <VmPowerMenu
+            idleLabel="Shutdown"
+            loadingLabel={
+              loading === "force_shutdown"
+                ? LOADING_BUTTON_LABEL.force_shutdown
+                : LOADING_BUTTON_LABEL.shutdown
+            }
+            isLoading={
+              loading === "shutdown" || loading === "force_shutdown"
+            }
+            disabled={powerMenusDisabled}
+            disabledTitle={powerMenuDisabledTitle}
+            menuAriaLabel="Shutdown options"
+            triggerClassName="bg-yellow-600/20 text-yellow-400 hover:bg-yellow-600/30"
+            items={[
+              {
+                label: "Shutdown (guest)",
+                onSelect: () => void runAction("shutdown"),
+              },
+              {
+                label: "Force shutdown…",
+                destructive: true,
+                destructiveTone: "red",
+                onSelect: () =>
+                  forceShutdownDialogRef.current?.showModal(),
+              },
+            ]}
+          />
+        </div>
+        <div className="grid min-w-0 grid-cols-2 gap-2">{deleteButton}</div>
+        <div className="min-w-0">
+          {isRunning ? (
+            <Link
+              href={`/dashboard/${orderId}/console`}
+              className={`${linkBase} hover:bg-[var(--accent)]/10`}
+            >
+              Console
+            </Link>
+          ) : (
+            <button
+              type="button"
+              disabled
+              title={offHint}
+              className={`${linkBase} cursor-not-allowed bg-transparent disabled:opacity-50`}
+            >
+              Console
+            </button>
+          )}
+        </div>
+        </div>
+        {actionError && (
+          <p className="text-sm text-red-400" role="alert">
+            {actionError}
+          </p>
+        )}
       </div>
       <dialog
         ref={forceShutdownDialogRef}

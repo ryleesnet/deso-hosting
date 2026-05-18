@@ -57,6 +57,12 @@ export interface Order {
    * failed, so the dashboard can show the user *why* the order is stuck and offer a retry.
    */
   provisionError?: string;
+  /** Optional second NIC on an isolated per-user VLAN for private VM-to-VM traffic (10.200.0.0/24). */
+  privateLanEnabled?: boolean;
+  /** Proxmox bridge tag; same value for all of this user's VMs that use private LAN. */
+  privateLanVlan?: number;
+  /** Assigned host address, e.g. 10.200.0.7 */
+  privateLanIp?: string;
 }
 
 export interface Subscription {

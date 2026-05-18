@@ -10,6 +10,8 @@ type Props = {
   shouldCheckPower: boolean;
   userPublicKey: string;
   onSuccess: () => void;
+  /** When true, button fills a grid cell (paired with Reinstall on the dashboard). */
+  fillCell?: boolean;
 };
 
 export function CancelVpsButton({
@@ -17,6 +19,7 @@ export function CancelVpsButton({
   shouldCheckPower,
   userPublicKey,
   onSuccess,
+  fillCell,
 }: Props) {
   const [vmRunning, setVmRunning] = useState(false);
   const deleteDialogRef = useRef<HTMLDialogElement>(null);
@@ -63,7 +66,9 @@ export function CancelVpsButton({
           if (!userPublicKey || disabled) return;
           deleteDialogRef.current?.showModal();
         }}
-        className="rounded-lg border border-red-500/50 px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/10 disabled:opacity-50"
+        className={`rounded-lg border border-red-500/50 px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/10 disabled:opacity-50${
+          fillCell ? " flex w-full justify-center" : ""
+        }`}
       >
         Delete
       </button>

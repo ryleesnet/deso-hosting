@@ -15,13 +15,35 @@ import { identity } from "deso-protocol";
 import { getCurrentUser } from "@/lib/deso";
 import { PUBLIC_KEY_HEADER } from "@/lib/api-auth-headers";
 
-let cachedJwt: { token: string; mintedAt: number } | null = null;
+let cachedJwt: { token: string; mintedAt: number; ownerPublicKey: string } | null =
+  null;
 /** JWT lifetime in deso-protocol is 30 minutes; refresh well before to avoid races. */
 const JWT_REUSE_MS = 25 * 60 * 1000;
 
-async function getFreshJwt(force = false): Promise<string> {
+/**
+ * Public key for API auth headers, kept in sync with the React auth session.
+ *
+ * `getCurrentUser()` reads Identity storage (`desoActivePublicKey` + `desoIdentityUsers`).
+ * {@link setApiSessionPublicKey} is a narrow fallback when storage is not ready yet.
+ */
+let sessionPublicKey: string | null = null;
+
+export function setApiSessionPublicKey(publicKey: string | null | undefined): void {
+  const t = typeof publicKey === "string" ? publicKey.trim() : "";
+  sessionPublicKey = t || null;
+}
+
+async function getFreshJwt(
+  ownerPublicKey: string,
+  force = false
+): Promise<string> {
   const now = Date.now();
-  if (!force && cachedJwt && now - cachedJwt.mintedAt < JWT_REUSE_MS) {
+  if (
+    !force &&
+    cachedJwt &&
+    cachedJwt.ownerPublicKey === ownerPublicKey &&
+    now - cachedJwt.mintedAt < JWT_REUSE_MS
+  ) {
     return cachedJwt.token;
   }
   const token = await identity.jwt();
@@ -30,7 +52,7 @@ async function getFreshJwt(force = false): Promise<string> {
       "Could not mint a DeSo JWT. Reconnect your DeSo Identity to continue."
     );
   }
-  cachedJwt = { token, mintedAt: now };
+  cachedJwt = { token, mintedAt: now, ownerPublicKey };
   return token;
 }
 
@@ -52,7 +74,9 @@ async function injectAuthHeaders(
   forceRefresh = false
 ): Promise<void> {
   const user = getCurrentUser();
-  const pk = asPublicKey?.trim() || user?.publicKey;
+  /** Prefer Identity localStorage (`desoActivePublicKey`) over React session — it stays in sync with `identity.jwt()`. */
+  const pk =
+    asPublicKey?.trim() || user?.publicKey || sessionPublicKey;
   if (!pk) {
     throw new Error("Not logged in");
   }
@@ -60,13 +84,14 @@ async function injectAuthHeaders(
     headers.set(PUBLIC_KEY_HEADER, pk);
   }
   if (!headers.has("Authorization")) {
-    const jwt = await getFreshJwt(forceRefresh);
+    const jwt = await getFreshJwt(pk, forceRefresh);
     headers.set("Authorization", `Bearer ${jwt}`);
   }
 }
 
 /**
  * Authenticated fetch. On 401, retries once with a freshly minted JWT to handle expiry.
+ * On 403 from JWT / derived-key verification, retries once after clearing the JWT cache.
  *
  * Throws if the user is not logged in (no public key + JWT to attach). If you intend to
  * call a public endpoint, pass `{ skipAuth: true }`.
@@ -83,13 +108,37 @@ export async function apiFetch(
   }
 
   const res = await fetch(input, { ...rest, headers });
-  if (skipAuth || res.status !== 401) return res;
+  if (skipAuth) return res;
 
   // JWT may have expired — refresh and retry once.
-  const retryHeaders = new Headers(rest.headers);
-  retryHeaders.delete("Authorization");
-  await injectAuthHeaders(retryHeaders, asPublicKey, true);
-  return fetch(input, { ...rest, headers: retryHeaders });
+  if (res.status === 401) {
+    const retryHeaders = new Headers(rest.headers);
+    retryHeaders.delete("Authorization");
+    await injectAuthHeaders(retryHeaders, asPublicKey, true);
+    return fetch(input, { ...rest, headers: retryHeaders });
+  }
+
+  // Mismatched cached JWT vs active user often surfaces as 403 from JWT verification.
+  if (res.status === 403) {
+    let msg = "";
+    try {
+      const data = (await res.clone().json()) as { error?: unknown };
+      msg = typeof data?.error === "string" ? data.error : "";
+    } catch {
+      /* ignore */
+    }
+    const retryable =
+      /derived key|jwt|verify derived key authorization/i.test(msg);
+    if (retryable) {
+      clearJwtCache();
+      const retryHeaders = new Headers(rest.headers);
+      retryHeaders.delete("Authorization");
+      await injectAuthHeaders(retryHeaders, asPublicKey, true);
+      return fetch(input, { ...rest, headers: retryHeaders });
+    }
+  }
+
+  return res;
 }
 
 export async function apiJson<T = unknown>(

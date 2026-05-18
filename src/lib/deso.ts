@@ -9,6 +9,7 @@ import { configure, identity, sendDeso } from "deso-protocol";
 
 // Must match deso-protocol's storage key (see node_modules/deso-protocol/src/identity/constants.js)
 const IDENTITY_USERS_KEY = "desoIdentityUsers";
+const IDENTITY_ACTIVE_PUBLIC_KEY = "desoActivePublicKey";
 const SESSION_DESO_USERNAME_KEY = "desoHostingSessionDesoUsername";
 
 /** Persist DeSo username in sessionStorage for VPS ordering cloud-init Linux name across refreshes. */
@@ -24,22 +25,26 @@ export function getRememberedSessionDesoUsername(): string | undefined {
   return v?.trim() ? v.trim() : undefined;
 }
 
-/** 12× monthly nanos — total GlobalDESOLimit runway for recurring subscription payments. */
+/** 12× monthly nanos — for quoting / admin use; not used for Identity login cap anymore. */
 export function paymentGlobalDesoLimitNanos(amountNanos: number): number {
   const n = Math.max(0, Math.floor(Number(amountNanos) || 0));
   if (n <= 0) return 0;
   return n * 12;
 }
 
+/** ~0.01 DESO — Identity `GlobalDESOLimit` at login / first `configure()`. */
+const LOGIN_GLOBAL_DESO_LIMIT_NANOS = 10_000_000;
+
 /**
- * GlobalDESOLimit (nanos) requested at Identity login. If this is too low, every
- * `sendDeso` looks like a new authorization. Identity prompts again only when the
- * on-chain derived key needs more headroom (`requestPermissions`).
+ * GlobalDESOLimit (nanos) passed to Identity `configure()` (drives the initial derived-key
+ * approval at login). We keep this minimal so users only grant ~0.01 DESO up front.
  *
- * - NEXT_PUBLIC_IDENTITY_GLOBAL_DESO_LIMIT_NANOS — exact total-cap override
- * - NEXT_PUBLIC_IDENTITY_LOGIN_SPENDING_CAP_NANOS — legacy alias
- * - NEXT_PUBLIC_MAX_MONTHLY_PAYMENT_NANOS — uses 12× this (match your priciest plan)
- * - Else — 12× 0.1 DESO/month (~1.2 DESO total)
+ * When someone pays for a VPS or renewal, `sendDeso` runs `guardTxPermission`, which
+ * calls `identity.requestPermissions` if the on-chain cap is too low for that transfer.
+ *
+ * Override (nanos):
+ * - NEXT_PUBLIC_IDENTITY_GLOBAL_DESO_LIMIT_NANOS
+ * - NEXT_PUBLIC_IDENTITY_LOGIN_SPENDING_CAP_NANOS (legacy alias)
  */
 function defaultLoginGlobalDesoLimitNanos(): number {
   const explicit =
@@ -50,13 +55,7 @@ function defaultLoginGlobalDesoLimitNanos(): number {
     if (Number.isFinite(n) && n > 0) return n;
   }
 
-  const monthlyMax = process.env.NEXT_PUBLIC_MAX_MONTHLY_PAYMENT_NANOS;
-  if (monthlyMax) {
-    const m = parseInt(String(monthlyMax).trim(), 10);
-    if (Number.isFinite(m) && m > 0) return paymentGlobalDesoLimitNanos(m);
-  }
-
-  return paymentGlobalDesoLimitNanos(100_000_000);
+  return LOGIN_GLOBAL_DESO_LIMIT_NANOS;
 }
 
 type InitOptions = {
@@ -78,6 +77,54 @@ export function initDeSo(opts?: InitOptions) {
   });
 }
 
+function normalizeDesoUsername(
+  raw: string | undefined | null
+): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const t = raw.trim().replace(/^@/, "");
+  return t || undefined;
+}
+
+/**
+ * Username DeSo Identity may merge into `desoIdentityUsers` (not always on the
+ * typed login payload). Read after `identity.login()` resolves.
+ */
+export function getStoredDesoUsername(publicKey: string): string | undefined {
+  if (typeof window === "undefined" || !publicKey.trim()) return undefined;
+  try {
+    const users = localStorage.getItem(IDENTITY_USERS_KEY);
+    if (!users) return undefined;
+    const parsed = JSON.parse(users) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const row = parsed[publicKey];
+    if (!row || typeof row !== "object") return undefined;
+    const u = row["username"];
+    return normalizeDesoUsername(typeof u === "string" ? u : undefined);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Client-side profile lookup (same as AuthContext mount). */
+export async function fetchClientDesoUsername(
+  publicKey: string
+): Promise<string | undefined> {
+  if (typeof window === "undefined" || !publicKey.trim()) return undefined;
+  try {
+    const res = await fetch("/api/profile/username", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicKey }),
+    });
+    const data = (await res.json()) as { username?: string | null };
+    return normalizeDesoUsername(data.username);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function loginWithDeSo(): Promise<{
   publicKey: string;
   username?: string;
@@ -85,14 +132,22 @@ export async function loginWithDeSo(): Promise<{
   initDeSo();
   try {
     const payload = await identity.login();
-    if (payload?.publicKeyAdded) {
-      const users = (payload as { users?: Record<string, { username?: string }> }).users;
-      return {
-        publicKey: payload.publicKeyAdded,
-        username: users?.[payload.publicKeyAdded]?.username,
-      };
-    }
-    return null;
+    if (!payload?.publicKeyAdded) return null;
+
+    const pk = payload.publicKeyAdded;
+    // Identity iframe sometimes omits username on the payload; it may still be in storage.
+    const users = (payload as { users?: Record<string, { username?: string }> })
+      .users;
+    const fromPayload = normalizeDesoUsername(
+      users?.[pk] ? users[pk]!.username : undefined
+    );
+    const fromStorage = getStoredDesoUsername(pk);
+    const username =
+      fromPayload ||
+      fromStorage ||
+      (await fetchClientDesoUsername(pk));
+
+    return { publicKey: pk, username };
   } catch (err) {
     console.error("DeSo login failed:", err);
     return null;
@@ -104,6 +159,7 @@ export async function logoutDeSo() {
   await identity.logout();
   if (typeof window !== "undefined") {
     localStorage.removeItem(IDENTITY_USERS_KEY);
+    localStorage.removeItem(IDENTITY_ACTIVE_PUBLIC_KEY);
     sessionStorage.removeItem(SESSION_DESO_USERNAME_KEY);
     // Drop any cached JWT so the next session can mint its own.
     const { clearJwtCache } = await import("@/lib/api-client");
@@ -138,10 +194,14 @@ export function getCurrentUser(): { publicKey: string } | null {
   const users = localStorage.getItem(IDENTITY_USERS_KEY);
   if (!users) return null;
   try {
-    const parsed = JSON.parse(users);
+    const parsed = JSON.parse(users) as Record<string, unknown>;
+    const active = localStorage.getItem(IDENTITY_ACTIVE_PUBLIC_KEY)?.trim();
+    if (active && parsed[active] != null) {
+      return { publicKey: active };
+    }
     const keys = Object.keys(parsed);
     if (keys.length === 0) return null;
-    return { publicKey: keys[0] };
+    return { publicKey: keys[0]! };
   } catch {
     return null;
   }
@@ -152,8 +212,8 @@ export async function payWithDeSo(
   amountNanos: number,
   memo?: string
 ) {
-  // Keep configure() aligned with login. Re-configuring a higher limit here does not
-  // increase the user's approved derived key and caused unnecessary permission popups.
+  // `sendDeso` → `guardTxPermission` prompts via Identity when the transfer exceeds
+  // the user’s approved GlobalDESOLimit (login only approves ~0.01 DESO).
   initDeSo();
   const user = getCurrentUser();
   if (!user) throw new Error("Not logged in");
