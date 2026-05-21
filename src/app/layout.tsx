@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { Header } from "@/components/Header";
+import { SiteFooter } from "@/components/SiteFooter";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -38,9 +39,12 @@ export default function RootLayout({
       >
         <AuthProvider>
           <Header />
-          <main className="min-h-[calc(100dvh-7rem)] pb-[max(1rem,env(safe-area-inset-bottom))] md:min-h-[calc(100dvh-4rem)] md:pb-0">
-            {children}
-          </main>
+          <div className="flex min-h-[calc(100dvh-7rem)] flex-col md:min-h-[calc(100dvh-4rem)]">
+            <main className="flex-1 pb-[max(1rem,env(safe-area-inset-bottom))] md:pb-0">
+              {children}
+            </main>
+            <SiteFooter />
+          </div>
         </AuthProvider>
       </body>
     </html>

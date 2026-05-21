@@ -29,6 +29,7 @@ import {
   resolveProvisionTarget,
 } from "@/lib/order-provision";
 import { requireUser } from "@/lib/api-auth";
+import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
 
 /** Clone + resize + subscribe after HTTP response returns (dashboard can poll provisioning → active). */
 async function finalizeProvision(orderId: string) {
@@ -144,14 +145,32 @@ export async function POST(req: NextRequest) {
     const publicKey = auth.publicKey;
 
     const body = await req.json();
-    const { serviceId, desoUsername, extraDisksGb, sshAccess, sshPublicKey } =
-      body as {
-        serviceId?: string;
-        desoUsername?: string;
-        extraDisksGb?: unknown;
-        sshAccess?: unknown;
-        sshPublicKey?: unknown;
-      };
+    const {
+      serviceId,
+      desoUsername,
+      extraDisksGb,
+      sshAccess,
+      sshPublicKey,
+      acceptedTermsRevision,
+    } = body as {
+      serviceId?: string;
+      desoUsername?: string;
+      extraDisksGb?: unknown;
+      sshAccess?: unknown;
+      sshPublicKey?: unknown;
+      acceptedTermsRevision?: unknown;
+    };
+
+    if (acceptedTermsRevision !== ORDER_TERMS_REVISION) {
+      return NextResponse.json(
+        {
+          error:
+            "You must accept the current Terms of Service before creating an order.",
+        },
+        { status: 400 }
+      );
+    }
+
     const normalizedExtra = normalizeExtraDisksGb(extraDisksGb);
     const sshMode = parseSshAuthFromBody(sshAccess);
 

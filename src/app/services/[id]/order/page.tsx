@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
 import { payWithDeSo, formatDesoDisplay } from "@/lib/deso";
 import { formatUsdCents } from "@/lib/pricing";
@@ -10,6 +11,7 @@ import {
   extraDisksProvisionedGbTotal,
 } from "@/lib/extra-disk-pricing";
 import { apiFetch } from "@/lib/api-client";
+import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
 
 const PAYMENT_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_DESO_PAYMENT_PUBLIC_KEY || "";
@@ -76,6 +78,7 @@ export default function OrderPage() {
     publicLine: string;
   } | null>(null);
   const [orderKeyCopyHint, setOrderKeyCopyHint] = useState<string | null>(null);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
 
   const maxExtraCount = useMemo(
     () =>
@@ -174,6 +177,13 @@ export default function OrderPage() {
       return;
     }
 
+    if (!acceptedTerms) {
+      setError(
+        "You must agree to the Terms of Service & Acceptable Use Policy before completing your purchase."
+      );
+      return;
+    }
+
     const totalUsdCents =
       service.priceUsdCents + extraDisksAddonUsdCents(extraDisksGb);
 
@@ -220,6 +230,7 @@ export default function OrderPage() {
           sshAccess: sshAccess === "none" ? "none" : sshAccess,
           sshPublicKey:
             sshAccess === "paste" ? sshPublicKeyDraft.trim() : undefined,
+          acceptedTermsRevision: ORDER_TERMS_REVISION,
         }),
       });
       const data = await res.json();
@@ -564,9 +575,37 @@ export default function OrderPage() {
         {error && (
           <p className="mt-4 text-sm text-red-400">{error}</p>
         )}
+        <div className="mt-6 border-t border-[var(--card-border)] pt-4">
+          <label className="flex cursor-pointer items-start gap-3 text-sm leading-snug">
+            <input
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(e) => {
+                setAcceptedTerms(e.target.checked);
+                setError(null);
+              }}
+              className="mt-1 h-4 w-4 shrink-0 rounded border-[var(--card-border)] accent-[var(--accent)]"
+            />
+            <span className="text-[var(--muted)]">
+              I have read and agree to the{" "}
+              <Link
+                href="/terms"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-[var(--accent)] underline hover:no-underline"
+              >
+                Terms of Service &amp; Acceptable Use Policy
+              </Link>
+              . I understand prohibited uses may result in immediate suspension without
+              refund.
+            </span>
+          </label>
+        </div>
         <button
           onClick={handleOrder}
-          disabled={ordering || quoteLoading || !!quoteError}
+          disabled={
+            ordering || quoteLoading || !!quoteError || !acceptedTerms
+          }
           className="mt-6 w-full rounded-lg bg-[var(--accent)] py-3 font-medium text-[var(--background)] transition hover:bg-[var(--accent-muted)] disabled:opacity-50"
         >
           {ordering ? "Processing..." : "Pay with DeSo & Order"}

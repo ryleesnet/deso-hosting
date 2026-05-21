@@ -67,10 +67,45 @@ Uses the [Proxmox VE API](https://pve.proxmox.com/wiki/Proxmox_VE_API):
 
 ## Console Access
 
-The VNC console connects from the browser to your Proxmox server. Ensure:
+The in-browser console uses **WebSockets**:
 
-1. `PROXMOX_HOST` is reachable from the client (use a public hostname if Proxmox is behind a firewall)
-2. Or set up a WebSocket reverse proxy (e.g. nginx) to proxy `wss://yourdomain.com/proxmox-ws` to Proxmox
+1. The client opens **`wss://<your-app-host>/api/proxmox-ws?token=...`** (HTTPS sites use **`wss:`**).
+2. The **custom Node server** (`npm run dev` / `npm run start` → `server.js`) handles the HTTP **upgrade**, then tunnels binary VNC frames to Proxmox’s **`vncwebsocket`** on port **8006** (TLS, self-signed certs allowed server-side).
+
+So your reverse proxy must support **passing through WebSocket upgrades** to **`/api/proxmox-ws`** with **long timeouts**. Plain HTTP timeouts (often 60s) will kill an idle-looking VNC session even though the tunnel is healthy.
+
+### Behind Nginx Proxy Manager (NPM)
+
+Yes — **misconfigured NPM is a common reason** consoles work locally but fail in production.
+
+1. On the **Proxy Host** for your app:
+   - Turn **Websockets Support** **ON**.
+2. If it still disconnects after ~60 seconds (or “times out”), add **Advanced** → **Custom Nginx Configuration** (adjust the upstream host/port or Docker service name as you use):
+
+```nginx
+location /api/proxmox-ws {
+    proxy_pass http://YOUR_APP_CONTAINER_OR_IP:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 86400s;
+    proxy_send_timeout 86400s;
+    proxy_connect_timeout 60s;
+    proxy_buffering off;
+}
+```
+
+3. **`next start`** without `server.js` will **not** run this proxy — production must run **`NODE_ENV=production node server.js`** (your `npm run start` script already does this).
+
+4. Proxmox only needs to be reachable from the **host running `server.js`**, not from the browser — NPM forwards to the app; the app opens **`wss://` to Proxmox**.
+
+### Behind plain nginx / Cloudflare
+
+- Same idea: **`Upgrade`** / **`Connection: upgrade`**, **`proxy_http_version 1.1`**, long **`proxy_read_timeout`** / **`proxy_send_timeout`** for that location.
+- If **Cloudflare** is in front, enable WebSockets on the zone and use a path that supports them; very aggressive firewall/bot rules can interfere with long-lived WebSockets.
 
 ## Data Storage
 
