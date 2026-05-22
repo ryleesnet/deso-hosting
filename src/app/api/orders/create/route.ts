@@ -12,7 +12,7 @@ import {
 } from "@/lib/proxmox";
 import { fetchDesoUsernameByPublicKey } from "@/lib/deso-profile";
 import { vmCredentialsFromDesoLogin } from "@/lib/vm-credentials";
-import { normalizeExtraDisksGb } from "@/lib/extra-disks";
+import { normalizeTieredExtraDisksGb } from "@/lib/extra-disks";
 import {
   allocatePublicIpForOrder,
   isPublicIpPoolConfigured,
@@ -171,7 +171,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const normalizedExtra = normalizeExtraDisksGb(extraDisksGb);
+    const normalizedExtra = normalizeTieredExtraDisksGb(extraDisksGb);
     const sshMode = parseSshAuthFromBody(sshAccess);
 
     if (!serviceId) {

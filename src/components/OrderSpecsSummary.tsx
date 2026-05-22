@@ -114,14 +114,30 @@ function formatDiskGb(gb: number) {
 export function OrderSpecsSummary({
   orderId,
   plan,
+  /** Order's catalogue `serviceId` — bumps refetch after plan upgrades. */
+  catalogServiceId,
+  /** When false after a resize, bumps refetch once `adjustingPlan` clears so Proxmox data is re-read. */
+  adjustingPlan = false,
+  /** Same for extra-disk maintenance. */
+  hardwareMaintenance = false,
+  listClassName,
+  extrasFingerprint,
 }: {
   orderId: string;
   plan: OrderPlanSpecs;
+  catalogServiceId?: string;
+  adjustingPlan?: boolean;
+  hardwareMaintenance?: boolean;
+  /** Replaces default `mt-3` on the spec list (e.g. `mt-0` in a stacked card). */
+  listClassName?: string;
+  /** Bump when `extraDisksGb` changes so live disk list refetches. */
+  extrasFingerprint?: string;
 }) {
   const [specs, setSpecs] = useState<SpecsPayload | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    setSpecs(null);
     void apiFetch(`/api/vm/${orderId}/specs`)
       .then((r) => r.json())
       .then((data: SpecsPayload & { error?: string }) => {
@@ -138,7 +154,7 @@ export function OrderSpecsSummary({
     return () => {
       cancelled = true;
     };
-  }, [orderId]);
+  }, [orderId, catalogServiceId, adjustingPlan, hardwareMaintenance, extrasFingerprint]);
 
   const vcpus = specs?.vcpus ?? plan?.vcpu;
   const memoryMb = specs?.memoryMb ?? plan?.ram;
@@ -211,12 +227,16 @@ export function OrderSpecsSummary({
 
   if (rows.length === 0) {
     return (
-      <p className="mt-2 text-sm text-[var(--muted)]">Specifications unavailable</p>
+      <p className="mt-2 text-sm text-[var(--muted)]">
+        Specifications unavailable
+      </p>
     );
   }
 
+  const listCn = listClassName ?? "mt-3 flex flex-col gap-2.5";
+
   return (
-    <ul className="mt-3 flex flex-col gap-2.5" role="list">
+    <ul className={listCn} role="list">
       {rows.map(({ key, node }) => (
         <li key={key} className="flex items-center gap-3 text-sm">
           {node}

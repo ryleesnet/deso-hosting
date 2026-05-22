@@ -63,6 +63,15 @@ export interface Order {
   privateLanVlan?: number;
   /** Assigned host address, e.g. 10.200.0.7 */
   privateLanIp?: string;
+  /**
+   * Set while upgrade/downgrade (halt → resize CPU/RAM/disk → start) runs on the hypervisor so
+   * the dashboard can poll and disable overlapping actions.
+   */
+  adjustingPlan?: boolean;
+  /**
+   * Set while extra-disk attach/detach runs (guest stopped briefly).
+   */
+  hardwareMaintenance?: boolean;
 }
 
 export interface Subscription {

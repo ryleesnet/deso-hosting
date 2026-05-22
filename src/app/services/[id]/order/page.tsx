@@ -9,7 +9,12 @@ import { formatUsdCents } from "@/lib/pricing";
 import {
   extraDisksAddonUsdCents,
   extraDisksProvisionedGbTotal,
+  extraDiskTierMenuLabel,
 } from "@/lib/extra-disk-pricing";
+import {
+  EXTRA_DISK_TIER_SIZES_GB,
+  labelExtraDiskTierGb,
+} from "@/lib/extra-disks";
 import { apiFetch } from "@/lib/api-client";
 import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
 
@@ -68,8 +73,10 @@ export default function OrderPage() {
   const [loading, setLoading] = useState(true);
   const [ordering, setOrdering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [extraInput, setExtraInput] = useState("");
   const [extraDisksGb, setExtraDisksGb] = useState<number[]>([]);
+  const [selectedTierGb, setSelectedTierGb] = useState<number>(
+    EXTRA_DISK_TIER_SIZES_GB[0]!
+  );
   const [sshAccess, setSshAccess] = useState<SshAccessMode>("none");
   const [sshPublicKeyDraft, setSshPublicKeyDraft] = useState("");
   const [orderKeyBundle, setOrderKeyBundle] = useState<{
@@ -88,15 +95,6 @@ export default function OrderPage() {
       ),
     []
   );
-  const maxGbEach = useMemo(
-    () =>
-      parseEnvInt(
-        process.env.NEXT_PUBLIC_PROVISION_MAX_EXTRA_DISK_GB_EACH,
-        2048
-      ),
-    []
-  );
-
   const extraAddonCents = useMemo(
     () => extraDisksAddonUsdCents(extraDisksGb),
     [extraDisksGb]
@@ -153,18 +151,11 @@ export default function OrderPage() {
 
   function addExtraDisk() {
     setError(null);
-    const n = parseInt(extraInput.trim(), 10);
-    if (!Number.isFinite(n) || n < 1) {
-      setError("Enter a whole number of GB (1 or more) for an extra disk.");
-      return;
-    }
     if (extraDisksGb.length >= maxExtraCount) {
       setError(`At most ${maxExtraCount} additional disks.`);
       return;
     }
-    const gb = Math.min(Math.floor(n), maxGbEach);
-    setExtraDisksGb((prev) => [...prev, gb]);
-    setExtraInput("");
+    setExtraDisksGb((prev) => [...prev, selectedTierGb]);
   }
 
   function removeExtraDisk(index: number) {
@@ -383,8 +374,8 @@ export default function OrderPage() {
             Payment confirmation
           </h4>
           <p className="mt-2 text-sm text-[var(--muted)]">
-            Plan price is set in USD. Extra data disks are billed at $1/mo per 50 GB
-            of provisioned capacity (prorated; sum of the extra disk sizes you add). DeSo amount follows the current exchange rate.
+            Plan price is set in USD. When you add extra disks, each tier in the menu shows its
+            monthly USD add-on for that volume. DeSo amount follows the current exchange rate.
           </p>
           <dl className="mt-3 space-y-2 text-sm">
             <div className="flex justify-between gap-4">
@@ -524,11 +515,9 @@ export default function OrderPage() {
             Additional disks (optional)
           </h4>
           <p className="mt-1 text-xs text-[var(--muted)]">
-            Extra data volumes on the same storage as the plan disk (max {maxExtraCount} disks, up to{" "}
-            {maxGbEach} GB each). You partition and mount them in the guest after boot.{" "}
-            <span className="text-[var(--foreground)]">
-              Add-on: $1/month per 50 GB of provisioned extra disk (prorated; sum of sizes above).
-            </span>
+            Extra data volumes on the same storage as the plan disk (max {maxExtraCount} disks).
+            Each size in the menu includes that disk&apos;s monthly USD add-on. You partition and mount
+            them in the guest after boot.
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             {extraDisksGb.map((gb, i) => (
@@ -536,12 +525,12 @@ export default function OrderPage() {
                 key={`extra-${i}`}
                 className="inline-flex items-center gap-1 rounded-full border border-[var(--card-border)] bg-[var(--background)]/40 px-2 py-1 text-sm"
               >
-                {gb} GB
+                {labelExtraDiskTierGb(gb)}
                 <button
                   type="button"
                   onClick={() => removeExtraDisk(i)}
                   className="ml-1 rounded px-1 text-[var(--muted)] hover:bg-[var(--card-border)] hover:text-[var(--foreground)]"
-                  aria-label={`Remove ${gb} GB disk`}
+                  aria-label={`Remove ${labelExtraDiskTierGb(gb)} disk`}
                 >
                   ×
                 </button>
@@ -549,19 +538,21 @@ export default function OrderPage() {
             ))}
           </div>
           <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-            <label className="sr-only" htmlFor="extra-disk-gb">
-              Extra disk size in GB
+            <label className="sr-only" htmlFor="extra-disk-tier">
+              Extra disk size
             </label>
-            <input
-              id="extra-disk-gb"
-              type="number"
-              min={1}
-              max={maxGbEach}
-              placeholder={`Size (1–${maxGbEach} GB)`}
-              value={extraInput}
-              onChange={(e) => setExtraInput(e.target.value)}
+            <select
+              id="extra-disk-tier"
+              value={selectedTierGb}
+              onChange={(e) => setSelectedTierGb(Number(e.target.value))}
               className="w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm sm:max-w-xs"
-            />
+            >
+              {EXTRA_DISK_TIER_SIZES_GB.map((gb) => (
+                <option key={gb} value={gb}>
+                  {extraDiskTierMenuLabel(gb)}
+                </option>
+              ))}
+            </select>
             <button
               type="button"
               onClick={addExtraDisk}

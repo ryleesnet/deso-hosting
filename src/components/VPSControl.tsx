@@ -259,6 +259,8 @@ export function VPSControl({
   orderId,
   deleteButton,
   onPowerFlowPending,
+  powerLocked = false,
+  powerLockedTitle,
 }: {
   orderId: string;
   /** Two grid cells (e.g. Reinstall + Delete), equal width inside {@link VPSControl}. */
@@ -268,6 +270,9 @@ export function VPSControl({
    * Do not clear on success — parent clears after `VMRunningStatus` sees the target state.
    */
   onPowerFlowPending?: (pending: VmPowerControlAction | null) => void;
+  /** When true, power actions and console are disabled (e.g. plan change in progress). */
+  powerLocked?: boolean;
+  powerLockedTitle?: string;
 }) {
   const { user } = useAuth();
   const [loading, setLoading] = useState<Action | null>(null);
@@ -305,7 +310,7 @@ export function VPSControl({
   }, [refreshPowerStatus]);
 
   async function runAction(action: Action) {
-    if (!user) return;
+    if (!user || powerLocked) return;
     setActionError(null);
     setLoading(action);
     onPowerFlowPending?.(action);
@@ -363,10 +368,17 @@ export function VPSControl({
   const linkBase =
     "flex w-full items-center justify-center rounded-lg border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)]";
 
-  const powerMenusDisabled = loading !== null || !isRunning;
+  const hwLocked = powerLocked;
+  const lockExplain = hwLocked
+    ? typeof powerLockedTitle === "string" && powerLockedTitle.trim().length > 0
+      ? powerLockedTitle.trim()
+      : "Unavailable while another operation runs on this VPS."
+    : undefined;
 
-  const powerMenuDisabledTitle =
-    !isRunning
+  const powerMenusDisabled = loading !== null || !isRunning || hwLocked;
+  const powerMenuDisabledTitle = hwLocked
+    ? lockExplain
+    : !isRunning
       ? offHint
       : loading !== null
         ? "Please wait for the current operation"
@@ -388,8 +400,10 @@ export function VPSControl({
           <button
             type="button"
             onClick={() => runAction("start")}
-            disabled={loading !== null || isRunning}
-            title={isRunning ? "VM is already running" : undefined}
+            disabled={loading !== null || isRunning || hwLocked}
+            title={
+              hwLocked ? lockExplain : isRunning ? "VM is already running" : undefined
+            }
             className={`rounded-lg bg-green-600/20 px-3 py-1.5 text-sm text-green-400 hover:bg-green-600/30 disabled:cursor-not-allowed ${btnPulseWhen(
               "start"
             )} ${btnOpacityWhen("start")}`}
@@ -455,7 +469,7 @@ export function VPSControl({
         </div>
         <div className="grid min-w-0 grid-cols-2 gap-2">{deleteButton}</div>
         <div className="min-w-0">
-          {isRunning ? (
+          {isRunning && !hwLocked ? (
             <Link
               href={`/dashboard/${orderId}/console`}
               className={`${linkBase} hover:bg-[var(--accent)]/10`}
@@ -466,7 +480,9 @@ export function VPSControl({
             <button
               type="button"
               disabled
-              title={offHint}
+              title={
+                hwLocked ? lockExplain : offHint
+              }
               className={`${linkBase} cursor-not-allowed bg-transparent disabled:opacity-50`}
             >
               Console

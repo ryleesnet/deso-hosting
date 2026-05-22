@@ -242,6 +242,42 @@ export async function getVMStatus(
   };
 }
 
+/**
+ * Graceful ACPI shutdown, then force stop if needed. Returns whether the guest was running
+ * before this call (caller may want to start again after maintenance).
+ */
+export async function haltVmForPlanMaintenance(
+  node: string,
+  vmid: number
+): Promise<{ wasRunning: boolean }> {
+  const client = await getProxmoxClient();
+  let status: ReturnType<typeof normalizeQemuStatusField>;
+  try {
+    const { data } = await client.get(
+      `/nodes/${node}/qemu/${vmid}/status/current`
+    );
+    status = normalizeQemuStatusField(data.data?.status);
+  } catch {
+    return { wasRunning: false };
+  }
+
+  if (status === "stopped") {
+    return { wasRunning: false };
+  }
+
+  const wasRunning = status === "running" || status === "paused";
+
+  await shutdownVM(node, vmid);
+  try {
+    await waitUntilVmStopped(client, node, vmid);
+  } catch {
+    await stopVM(node, vmid, { overruleShutdown: true });
+    await waitUntilVmStopped(client, node, vmid);
+  }
+
+  return { wasRunning };
+}
+
 /** Parsed hardware from Proxmox VM config (/nodes/{node}/qemu/{vmid}/config). */
 export interface VMParsedSpecs {
   vcpus: number;
@@ -357,7 +393,7 @@ function hardwareTaskPollTimeoutMs(): number | null {
   return parseTimeoutEnv(process.env.PROXMOX_HARDWARE_TASK_TIMEOUT_MS, 600_000); // 10 min
 }
 
-function findPrimaryDiskKey(cfg: Record<string, unknown>): string | null {
+export function findPrimaryDiskKey(cfg: Record<string, unknown>): string | null {
   const candidates: { order: number; key: string }[] = [];
 
   for (const [key, raw] of Object.entries(cfg)) {
@@ -426,7 +462,39 @@ function pickExtraDiskAttachBus(primaryKey: string | null): string {
   return bus;
 }
 
-async function attachExtraDataDisksToVM(
+/**
+ * Extra data volumes excluding the VM boot/root disk — same conventions as attachExtraDataDisksToVM
+ * (`pickExtraDiskAttachBus`/slot numbering). Sorted by ascending slot index.
+ */
+export function listManagedExtraGuestDiskVolumes(
+  cfg: Record<string, unknown>
+): { key: string; sizeGb: number }[] {
+  const primaryDiskKey = findPrimaryDiskKey(cfg);
+  const attachBus = pickExtraDiskAttachBus(primaryDiskKey);
+  const re = new RegExp(`^${attachBus}(\\d+)$`, "i");
+
+  const primaryLc = primaryDiskKey?.toLowerCase() ?? null;
+  const hits: { key: string; sizeGb: number; idx: number }[] = [];
+
+  for (const [keyRaw, raw] of Object.entries(cfg)) {
+    if (/^(unused|efidisk|tpmstate)/i.test(keyRaw)) continue;
+    const m = keyRaw.match(re);
+    if (!m?.[2] || typeof raw !== "string") continue;
+    const gb = parseSizeToGb(raw);
+    if (gb === null) continue;
+
+    const keyNorm = keyRaw.toLowerCase();
+    if (primaryLc && keyNorm === primaryLc) continue;
+
+    const idx = parseInt(m[2], 10);
+    hits.push({ key: keyRaw, sizeGb: gb, idx });
+  }
+
+  hits.sort((a, b) => a.idx - b.idx);
+  return hits.map(({ key, sizeGb }) => ({ key, sizeGb }));
+}
+
+export async function attachExtraDataDisksToVM(
   client: AxiosInstance,
   node: string,
   vmid: number,
@@ -458,6 +526,35 @@ async function attachExtraDataDisksToVM(
       node,
       hardwareTaskPollTimeoutMs(),
       "qemu-config"
+    );
+  }
+}
+
+/** Remove a QEMU guest disk attachment (`virtioX` / `scsiX`, …); does not reclaim storage chunks on nodes. */
+export async function detachQemuGuestDiskAttachment(
+  node: string,
+  vmid: number,
+  diskKey: string
+): Promise<void> {
+  const client = await getProxmoxClient();
+  const body = new URLSearchParams();
+  body.set("delete", diskKey);
+  const res = await client.post(
+    `/nodes/${node}/qemu/${vmid}/config`,
+    body.toString(),
+    {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    }
+  );
+
+  const upid = res.data?.data;
+  if (typeof upid === "string" && upid.startsWith("UPID:")) {
+    await waitForTask(
+      client,
+      upid,
+      node,
+      hardwareTaskPollTimeoutMs(),
+      "qemu-disk-detach"
     );
   }
 }
@@ -542,6 +639,10 @@ export async function applyServiceHardwareToVM(
       vlanTag: number;
       bridge?: string;
     };
+    /**
+     * When true (e.g. plan change): do not attach new extra-data volumes — they already exist.
+     */
+    skipAttachExtraVolumes?: boolean;
   }
 ): Promise<void> {
   const client = await getProxmoxClient();
@@ -660,7 +761,7 @@ export async function applyServiceHardwareToVM(
   }
 
   const extraGb = normalizeExtraDisksGb(options?.extraDisksGb);
-  if (extraGb.length > 0) {
+  if (!options?.skipAttachExtraVolumes && extraGb.length > 0) {
     const { data: cfgAfterRes } = await client.get(
       `/nodes/${node}/qemu/${vmid}/config`
     );

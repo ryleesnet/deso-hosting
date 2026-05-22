@@ -4,8 +4,9 @@ import {
   getService,
   getSubscriptionByOrder,
   updateOrder,
-  type VPSService,
+  updateSubscription,
   type Order,
+  type VPSService,
 } from "@/lib/db";
 import {
   applyServiceHardwareToVM,
@@ -13,7 +14,10 @@ import {
   destroyVM,
   getNextVMID,
   getVMStatus,
+  getVMParsedSpecs,
+  haltVmForPlanMaintenance,
   pickBestProvisioningNode,
+  startVM,
   stopVM,
 } from "@/lib/proxmox";
 import {
@@ -67,29 +71,17 @@ export function provisionErrorMessage(err: unknown): string {
   }
 }
 
+type ApplyHardwareToVmOptions = NonNullable<
+  Parameters<typeof applyServiceHardwareToVM>[3]
+>;
+
 /**
- * Run hardware + cloud-init + subscription steps against a VM that has already been cloned.
- * Idempotent: skips subscription creation if one already exists. Clears `provisionError`
- * on success so a retried order shows clean state.
- *
- * Used both by the initial post-clone path in `finalizeProvision` and by the explicit
- * `POST /api/orders/[id]/retry-provision` route, so users can recover when the configure
- * step failed (e.g. transient PVE errors) without re-cloning the VM.
+ * Builds the optional third argument for {@link applyServiceHardwareToVM} from Firestore order state.
  */
-async function applyHardwareToProvisionedVm(
-  order: Order,
-  service: VPSService
-): Promise<void> {
-  const hwOpts: {
-    cloudInit?: {
-      ciuser: string;
-      cipassword: string;
-      network?: CloudInitPublicNetwork;
-      nameserver?: string;
-      sshkeys?: string;
-    };
-    extraDisksGb?: unknown;
-  } = {};
+async function buildApplyHardwareOptionsFromOrder(
+  order: Order
+): Promise<ApplyHardwareToVmOptions> {
+  const hwOpts: ApplyHardwareToVmOptions = {};
   if (order.vmLoginUsername && order.vmLoginPassword) {
     hwOpts.cloudInit = {
       ciuser: order.vmLoginUsername,
@@ -126,10 +118,18 @@ async function applyHardwareToProvisionedVm(
         }
       : undefined;
 
-  const hardwareOpts: Parameters<typeof applyServiceHardwareToVM>[3] = {
+  const out: ApplyHardwareToVmOptions = {
     ...hwOpts,
     ...(privateLan ? { privateLan } : {}),
   };
+  return out;
+}
+
+async function applyHardwareToProvisionedVm(
+  order: Order,
+  service: VPSService
+): Promise<void> {
+  const hardwareOpts = await buildApplyHardwareOptionsFromOrder(order);
 
   await applyServiceHardwareToVM(
     order.node,
@@ -143,6 +143,128 @@ async function applyHardwareToProvisionedVm(
   );
 }
 
+/**
+ * Change the VPS to a different active catalogue plan (CPU/RAM/disk tier). The VM must be stopped;
+ * this halts gracefully (ACPI, then forced stop), applies new sizing, updates Firestore and
+ * recurring subscription nanos when present, then restarts only if it was running before.
+ *
+ * Does not shrink the root disk: the target plan disk size must not be smaller than the
+ * VM's current provisioned boot volume.
+ */
+export async function performVpsPlanChange(
+  orderId: string,
+  targetServiceId: string
+): Promise<{ wasRunning: boolean }> {
+  const order = await getOrder(orderId);
+  if (!order) {
+    throw new Error(`Order ${orderId} not found`);
+  }
+  if (order.status !== "active") {
+    throw new Error(
+      "Plan changes are only allowed for active VPS. Renew first if suspended."
+    );
+  }
+  if (!order.vmid || order.vmid <= 0 || !order.node?.trim()) {
+    throw new Error("No provisioned VM to resize");
+  }
+  const node = order.node;
+
+  const targetService = await getService(targetServiceId);
+  if (!targetService?.active) {
+    throw new Error("That plan does not exist or is not orderable.");
+  }
+
+  if (targetService.id === order.serviceId) {
+    throw new Error("Already on this plan.");
+  }
+
+  let measuredRootGb: number | undefined;
+  try {
+    const parsed = await getVMParsedSpecs(node, order.vmid);
+    measuredRootGb = parsed.disksGb[0];
+  } catch {
+    /* fall back below */
+  }
+  const fallbackService = await getService(order.serviceId);
+  const measured =
+    measuredRootGb !== undefined &&
+    typeof measuredRootGb === "number" &&
+    Number.isFinite(measuredRootGb) &&
+    measuredRootGb > 0
+      ? measuredRootGb
+      : 0;
+  const catalogFloor = fallbackService?.storage ?? 0;
+  const minRequiredStorage = Math.max(measured, catalogFloor);
+
+  if (targetService.storage + 1e-6 < minRequiredStorage) {
+    const need = Math.ceil(minRequiredStorage);
+    throw new Error(
+      `This plan allocates ${targetService.storage} GB for the OS disk — smaller than your VM's provisioned boot volume (~${need} GB). Choose a plan with at least ~${need} GB, or reinstall.`
+    );
+  }
+
+  const hardwareOpts = await buildApplyHardwareOptionsFromOrder(order);
+  const { wasRunning } = await haltVmForPlanMaintenance(node, order.vmid);
+
+  try {
+    await applyServiceHardwareToVM(
+      node,
+      order.vmid,
+      {
+        vcpu: targetService.vcpu,
+        ramMb: targetService.ram,
+        storageGb: targetService.storage,
+      },
+      { ...hardwareOpts, skipAttachExtraVolumes: true }
+    );
+
+    await updateOrder(orderId, {
+      serviceId: targetService.id,
+      provisionError: "",
+    });
+
+    const subscription = await getSubscriptionByOrder(orderId);
+    if (
+      subscription &&
+      subscription.status !== "cancelled" &&
+      (subscription.status === "active" || subscription.status === "past_due")
+    ) {
+      const amountNanos = await monthlyAmountNanosForOrder(
+        targetService,
+        order.extraDisksGb
+      );
+      await updateSubscription(subscription.id, { amountNanos });
+    }
+
+    if (wasRunning) {
+      await startVM(node, order.vmid);
+    }
+
+    return { wasRunning };
+  } catch (err) {
+    if (wasRunning) {
+      try {
+        await startVM(node, order.vmid);
+      } catch (restartErr) {
+        console.error(
+          `[performVpsPlanChange] Failed to restart VM after error for ${orderId}:`,
+          restartErr
+        );
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Run hardware + cloud-init + subscription steps against a VM that has already been cloned.
+ * Idempotent: skips subscription creation if one already exists. Clears `provisionError`
+ * on success so a retried order shows clean state.
+ *
+ * Used both by the initial post-clone path in `finalizeProvision` and by the explicit
+ * `POST /api/orders/[id]/retry-provision` route, so users can recover when the configure
+ * step failed (e.g. transient PVE errors) without re-cloning the VM.
+ */
 /**
  * Re-apply plan + cloud-init + optional private LAN from Firestore to Proxmox without
  * changing subscription status or marking the order active.

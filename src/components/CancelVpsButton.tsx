@@ -10,6 +10,8 @@ type Props = {
   shouldCheckPower: boolean;
   userPublicKey: string;
   onSuccess: () => void;
+  /** When true, delete is unavailable (e.g. plan resize in progress), regardless of VM power. */
+  operationBlocked?: boolean;
   /** When true, button fills a grid cell (paired with Reinstall on the dashboard). */
   fillCell?: boolean;
 };
@@ -19,6 +21,7 @@ export function CancelVpsButton({
   shouldCheckPower,
   userPublicKey,
   onSuccess,
+  operationBlocked = false,
   fillCell,
 }: Props) {
   const [vmRunning, setVmRunning] = useState(false);
@@ -50,18 +53,19 @@ export function CancelVpsButton({
     return () => clearInterval(id);
   }, [refresh, shouldCheckPower]);
 
-  const disabled = shouldCheckPower && vmRunning;
+  const disabled = operationBlocked || (shouldCheckPower && vmRunning);
+  const title = operationBlocked
+    ? "Unavailable while disk or plan maintenance runs"
+    : disabled && shouldCheckPower && vmRunning
+      ? "Shut down the VM before cancelling this VPS"
+      : undefined;
 
   return (
     <>
       <button
         type="button"
         disabled={disabled}
-        title={
-          disabled
-            ? "Shut down the VM before cancelling this VPS"
-            : undefined
-        }
+        title={title}
         onClick={() => {
           if (!userPublicKey || disabled) return;
           deleteDialogRef.current?.showModal();

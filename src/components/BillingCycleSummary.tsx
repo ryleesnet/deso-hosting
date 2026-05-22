@@ -35,10 +35,18 @@ function CalendarIcon() {
   );
 }
 
-export function BillingCycleSummary({ billing }: { billing: BillingInfo | null }) {
+export function BillingCycleSummary({
+  billing,
+  className,
+}: {
+  billing: BillingInfo | null;
+  className?: string;
+}) {
   if (!billing) {
     return (
-      <p className="mt-3 text-sm text-[var(--muted)]">
+      <p
+        className={`mt-3 text-sm text-[var(--muted)]${className ? ` ${className}` : ""}`}
+      >
         Monthly billing attaches once this VPS has an active subscription.
       </p>
     );
@@ -60,7 +68,10 @@ export function BillingCycleSummary({ billing }: { billing: BillingInfo | null }
   const overdue = billing.subscriptionStatus === "past_due";
 
   return (
-    <ul className="mt-3 flex flex-col gap-2.5" role="list">
+    <ul
+      className={`mt-3 flex flex-col gap-2.5${className ? ` ${className}` : ""}`}
+      role="list"
+    >
       <li className="flex items-center gap-3 text-sm">
         <IconWrap>
           <CalendarIcon />

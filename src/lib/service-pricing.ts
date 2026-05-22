@@ -53,7 +53,7 @@ export async function publicServiceById(
   return enrichServiceForPublic(service, rate);
 }
 
-/** Monthly recurring total in USD cents: service base + extra disk add-on ($1 / 50 GB, prorated). */
+/** Monthly recurring total in USD cents: service base + extra-disk add-on (see `extra-disk-pricing`). */
 export function monthlyTotalUsdCentsForOrder(
   service: VPSService,
   usdPerDeso: number,

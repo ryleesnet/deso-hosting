@@ -9,12 +9,15 @@ export function PrivateUserLanPanel({
   ip,
   canEdit,
   onChange,
+  className,
 }: {
   orderId: string;
   enabled?: boolean;
   ip?: string;
   canEdit: boolean;
   onChange: () => void;
+  /** Extra classes for layout on the dashboard (margins / borders handled by parent). */
+  className?: string;
 }) {
   const removeDialogRef = useRef<HTMLDialogElement>(null);
   const [busy, setBusy] = useState(false);
@@ -56,7 +59,9 @@ export function PrivateUserLanPanel({
   if (!canEdit) return null;
 
   return (
-    <div className="mt-5 rounded-lg border border-[var(--card-border)] bg-[var(--background)]/40 p-4">
+    <div
+      className={`mt-5 rounded-lg border border-[var(--card-border)] bg-[var(--background)]/40 p-4${className ? ` ${className}` : ""}`}
+    >
       <h4 className="text-sm font-semibold text-[var(--foreground)]">
         VM-to-VM private LAN
       </h4>
