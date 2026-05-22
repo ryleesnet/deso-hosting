@@ -2,6 +2,7 @@
  * Signed tokens for VNC console proxy.
  * Uses HMAC so the token works across processes (API route vs custom server).
  */
+/* eslint-disable @typescript-eslint/no-require-imports -- Loaded by bare Node (`server.js`) via require(); keep CommonJS. */
 
 const crypto = require("crypto");
 

@@ -137,7 +137,9 @@ export function OrderSpecsSummary({
 
   useEffect(() => {
     let cancelled = false;
-    setSpecs(null);
+    void Promise.resolve().then(() => {
+      if (!cancelled) setSpecs(null);
+    });
     void apiFetch(`/api/vm/${orderId}/specs`)
       .then((r) => r.json())
       .then((data: SpecsPayload & { error?: string }) => {

@@ -3,6 +3,7 @@
  * Docs: https://pve.proxmox.com/wiki/Proxmox_VE_API
  */
 
+import * as https from "node:https";
 import axios, { type AxiosInstance } from "axios";
 import { normalizeExtraDisksGb } from "@/lib/extra-disks";
 import type { CloudInitPublicNetwork } from "@/lib/public-ip-pool";
@@ -89,7 +90,6 @@ async function authenticate(): Promise<AuthResult> {
 }
 
 function getAxiosConfig() {
-  const https = require("https");
   return {
     httpsAgent: new https.Agent({ rejectUnauthorized: false }),
   };

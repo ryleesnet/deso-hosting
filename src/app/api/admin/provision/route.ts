@@ -5,6 +5,7 @@ import {
   getService,
   getSubscriptionByOrder,
   addSubscription,
+  readActiveOsTemplateProfiles,
 } from "@/lib/db";
 import {
   applyServiceHardwareToVM,
@@ -21,6 +22,7 @@ import {
 import { updatePublicIpMachineForOrder } from "@/lib/public-ip-store";
 import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
 import { requireAdmin } from "@/lib/api-auth";
+import { effectiveTemplatesForOrder, profileByTemplateVmidInList } from "@/lib/image-profiles";
 
 export async function POST(req: NextRequest) {
   try {
@@ -41,7 +43,27 @@ export async function POST(req: NextRequest) {
     }
 
     const service = await getService(order.serviceId);
-    const templateVmid = service?.proxmoxTemplate;
+    const hosted = await readActiveOsTemplateProfiles();
+    const profiles = service
+      ? effectiveTemplatesForOrder(order, service, hosted)
+      : [];
+    const fromStored =
+      typeof order.cloneTemplateVmid === "number" &&
+      order.cloneTemplateVmid > 0
+        ? profileByTemplateVmidInList(profiles, order.cloneTemplateVmid)
+            ?.templateVmid
+        : undefined;
+    const templateVmid =
+      fromStored ??
+      profiles[0]?.templateVmid ??
+      (service != null &&
+      service.proxmoxTemplate != null &&
+      service.proxmoxTemplate > 0
+        ? service.proxmoxTemplate
+        : undefined) ??
+      (typeof order.cloneTemplateVmid === "number" && order.cloneTemplateVmid > 0
+        ? order.cloneTemplateVmid
+        : undefined);
     const templateNode = service?.proxmoxNode || node;
 
     let vmLoginUsername = order.vmLoginUsername;

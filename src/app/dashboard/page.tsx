@@ -9,6 +9,7 @@ import {
 } from "@/components/VPSControl";
 import { VMProxmoxTitle } from "@/components/VMProxmoxTitle";
 import { VMRunningStatus } from "@/components/VMRunningStatus";
+import { DangerZoneCollapsible } from "@/components/DangerZoneCollapsible";
 import { CancelVpsButton } from "@/components/CancelVpsButton";
 import { OrderSpecsSummary } from "@/components/OrderSpecsSummary";
 import { BillingCycleSummary, type BillingInfo } from "@/components/BillingCycleSummary";
@@ -19,6 +20,10 @@ import { PrivateUserLanPanel } from "@/components/PrivateUserLanPanel";
 import { ChangeVpsPlanPanel } from "@/components/ChangeVpsPlanPanel";
 import { ExtraDataDisksPanel } from "@/components/ExtraDataDisksPanel";
 import { apiFetch } from "@/lib/api-client";
+import {
+  displayCloneImageSummary,
+  effectiveTemplatesForOrder,
+} from "@/lib/image-profiles";
 
 interface Order {
   id: string;
@@ -40,6 +45,9 @@ interface Order {
   hardwareMaintenance?: boolean;
   /** authorized_keys lines currently installed via cloud-init (server-side state). */
   cloudInitSshKeys?: string;
+  cloneTemplateVmid?: number;
+  cloneImageProfileId?: string;
+  imageProfiles?: { id: string; label: string; templateVmid: number }[];
   privateLanEnabled?: boolean;
   privateLanVlan?: number;
   privateLanIp?: string;
@@ -54,7 +62,15 @@ interface Service {
   priceUsdCents: number;
   pricePreviewNanos?: number;
   priceNanos?: number;
+  proxmoxTemplate?: number;
+  imageProfiles?: { id: string; label: string; templateVmid: number }[];
 }
+
+type HostedCatalogProfile = {
+  id: string;
+  label: string;
+  templateVmid: number;
+};
 
 function DashboardSection({
   title,
@@ -84,6 +100,9 @@ export default function DashboardPage() {
   const { user } = useAuth();
   const [orders, setOrders] = useState<Order[]>([]);
   const [services, setServices] = useState<Record<string, Service>>({});
+  const [hostedOsTemplates, setHostedOsTemplates] = useState<HostedCatalogProfile[]>(
+    []
+  );
   const [loading, setLoading] = useState(true);
   /** VM orderId → power action in progress (syncs status pill with controls). */
   const [vmPowerPendingByOrder, setVmPowerPendingByOrder] = useState<
@@ -144,8 +163,11 @@ export default function DashboardPage() {
     Promise.all([
       apiFetch(`/api/orders`).then((r) => r.json()),
       fetch("/api/services").then((r) => r.json()),
+      fetch("/api/os-templates")
+        .then((r) => r.json())
+        .catch(() => ({})),
     ])
-      .then(([ordersData, servicesData]) => {
+      .then(([ordersData, servicesData, osTplData]) => {
         const list = Array.isArray(ordersData) ? ordersData : [];
         setOrders(
           list.map((o: Order & { billing?: BillingInfo | null }) => ({
@@ -158,6 +180,10 @@ export default function DashboardPage() {
           map[s.id] = s;
         });
         setServices(map);
+        const pg = (
+          osTplData as { profiles?: HostedCatalogProfile[] } | undefined
+        )?.profiles;
+        setHostedOsTemplates(Array.isArray(pg) ? pg : []);
       })
       .catch((err) => {
         console.error("[dashboard] loadData failed", err);
@@ -242,6 +268,16 @@ export default function DashboardPage() {
             .map((order) => {
               const catalog = services[order.serviceId];
               const vmLocked = !!order.adjustingPlan || !!order.hardwareMaintenance;
+              const reinstallProfiles = effectiveTemplatesForOrder(
+                order,
+                catalog ?? {},
+                hostedOsTemplates
+              );
+              const osImageSummary = displayCloneImageSummary(
+                order,
+                catalog,
+                hostedOsTemplates
+              );
               return (
                 <article
                   key={order.id}
@@ -388,6 +424,12 @@ export default function DashboardPage() {
                           extrasFingerprint={(order.extraDisksGb ?? []).join(",")}
                           plan={services[order.serviceId]}
                         />
+                        {osImageSummary ? (
+                          <p className="mt-2 text-xs text-[var(--muted)] leading-relaxed">
+                            <span className="font-medium text-[var(--foreground)]">OS image:</span>{" "}
+                            {osImageSummary}
+                          </p>
+                        ) : null}
                         {order.status === "active" && order.vmid > 0 ? (
                           <ChangeVpsPlanPanel
                             orderId={order.id}
@@ -470,7 +512,7 @@ export default function DashboardPage() {
                             {order.status === "active" && order.vmid > 0 ? (
                               <VPSControl
                                 orderId={order.id}
-                            powerLocked={vmLocked}
+                                powerLocked={vmLocked}
                                 powerLockedTitle={
                                   order.adjustingPlan && order.hardwareMaintenance
                                     ? "VM maintenance in progress."
@@ -491,6 +533,9 @@ export default function DashboardPage() {
                                     <div className="min-w-0">
                                       <ReinstallVpsButton
                                         orderId={order.id}
+                                        profiles={reinstallProfiles}
+                                        orderProfileId={order.cloneImageProfileId}
+                                        orderTemplateVmid={order.cloneTemplateVmid}
                                         onStarted={loadData}
                                         disabled={
                                           !!vmPowerPendingByOrder[order.id] ||
@@ -513,31 +558,36 @@ export default function DashboardPage() {
                                 }
                               />
                             ) : (
-                              <div className="flex flex-wrap items-center gap-2">
-                                {(order.status === "active" ||
-                                  order.status === "suspended") &&
-                                order.vmid > 0 ? (
-                                  <ReinstallVpsButton
+                              <DangerZoneCollapsible>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {(order.status === "active" ||
+                                    order.status === "suspended") &&
+                                  order.vmid > 0 ? (
+                                    <ReinstallVpsButton
+                                      orderId={order.id}
+                                      profiles={reinstallProfiles}
+                                      orderProfileId={order.cloneImageProfileId}
+                                      orderTemplateVmid={order.cloneTemplateVmid}
+                                      onStarted={loadData}
+                                      disabled={
+                                        !!vmPowerPendingByOrder[order.id] ||
+                                        vmLocked
+                                      }
+                                    />
+                                  ) : null}
+                                  <CancelVpsButton
                                     orderId={order.id}
-                                    onStarted={loadData}
-                                    disabled={
-                                      !!vmPowerPendingByOrder[order.id] ||
-                                      vmLocked
+                                    shouldCheckPower={
+                                      order.status === "active" && order.vmid > 0
+                                    }
+                                    userPublicKey={user.publicKey}
+                                    onSuccess={loadData}
+                                    operationBlocked={
+                                      order.status === "active" && vmLocked
                                     }
                                   />
-                                ) : null}
-                                <CancelVpsButton
-                                  orderId={order.id}
-                                  shouldCheckPower={
-                                    order.status === "active" && order.vmid > 0
-                                  }
-                                  userPublicKey={user.publicKey}
-                                  onSuccess={loadData}
-                                  operationBlocked={
-                                    order.status === "active" && vmLocked
-                                  }
-                                />
-                              </div>
+                                </div>
+                              </DangerZoneCollapsible>
                             )}
                           </div>
                         </DashboardSection>

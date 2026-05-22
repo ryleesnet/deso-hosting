@@ -30,7 +30,7 @@ declare module "novnc-next" {
         | "disconnect"
         | "securityfailure"
         | "serververification",
-      handler: (...args: any[]) => void
+      handler: (...args: unknown[]) => void
     ): void;
     approveServer(): void;
     disconnect(): void;

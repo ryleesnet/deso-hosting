@@ -8,8 +8,6 @@ export type DeleteVpsConfirmationDialogProps = {
   /** Current order to cancel; read at confirm time so async open + ref pattern is safe. */
   orderIdRef: RefObject<string | null>;
   userPublicKey: string;
-  /** Unused since the server derives admin status from the verified JWT — kept for prop compatibility. */
-  isAdmin?: boolean;
   onSuccess: () => void;
   /** Called when the dialog is dismissed (Cancel, Escape, backdrop) so parents can clear pending state. */
   onDismiss?: () => void;
@@ -22,7 +20,6 @@ export function DeleteVpsConfirmationDialog({
   dialogRef,
   orderIdRef,
   userPublicKey,
-  isAdmin = false,
   onSuccess,
   onDismiss,
 }: DeleteVpsConfirmationDialogProps) {

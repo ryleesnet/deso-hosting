@@ -1,38 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import { ServiceForm } from "@/components/ServiceForm";
 import { DeleteVpsConfirmationDialog } from "@/components/DeleteVpsConfirmationDialog";
+import { OrderTemplatesModal } from "@/components/OrderTemplatesModal";
+import { OsTemplatesAdminPanel } from "@/components/OsTemplatesAdminPanel";
 import { formatDesoDisplay } from "@/lib/deso";
 import { formatUsdCents } from "@/lib/pricing";
 import { apiFetch } from "@/lib/api-client";
+import type { Order, VPSService } from "@/lib/db";
 
-interface VPSService {
-  id: string;
-  name: string;
-  description: string;
-  vcpu: number;
-  ram: number;
-  storage: number;
-  priceUsdCents: number;
-  pricePreviewNanos?: number;
-  priceNanos?: number;
-  active: boolean;
-  proxmoxNode?: string;
-  proxmoxTemplate?: number;
-}
-
-interface Order {
-  id: string;
-  userId: string;
-  serviceId: string;
-  vmid: number;
-  node: string;
-  status: string;
-  publicIpv4?: string;
-}
+/** Enriched row from `/api/admin/services` (DeSo preview computed server-side). */
+type AdminListedService = VPSService & { pricePreviewNanos?: number };
 
 interface PublicIpRecord {
   address: string;
@@ -45,11 +26,17 @@ interface PublicIpRecord {
 
 export default function AdminPage() {
   const { user, isAdmin } = useAuth();
-  const [services, setServices] = useState<VPSService[]>([]);
+  const [services, setServices] = useState<AdminListedService[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [publicIps, setPublicIps] = useState<PublicIpRecord[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  /** Admin modal: VPS-level OS catalogue (`orders.imageProfiles`). */
+  const [orderTemplatesModal, setOrderTemplatesModal] = useState<null | {
+    orderId: string;
+    profiles: { id: string; label: string; templateVmid: number }[];
+    hint?: string;
+  }>(null);
   const [loading, setLoading] = useState(true);
   const [editingIp, setEditingIp] = useState<string | null>(null);
   const [ipDraft, setIpDraft] = useState<{
@@ -261,7 +248,7 @@ export default function AdminPage() {
     }
   }
 
-  function loadData() {
+  const loadData = useCallback(() => {
     if (!user || !isAdmin) return;
     Promise.all([
       apiFetch(`/api/services`).then((r) => r.json()),
@@ -280,11 +267,11 @@ export default function AdminPage() {
     }).catch((err) => {
       console.error("[admin] loadData failed", err);
     }).finally(() => setLoading(false));
-  }
+  }, [user, isAdmin]);
 
   useEffect(() => {
     loadData();
-  }, [user, isAdmin]);
+  }, [loadData]);
 
   async function handleDelete(id: string) {
     if (!user || !confirm("Delete this service?")) return;
@@ -685,13 +672,17 @@ export default function AdminPage() {
         </form>
       </section>
 
+      <OsTemplatesAdminPanel />
+
       {/* Services */}
       <section className="mt-12">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold">VPS Services</h2>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold">VPS Services</h2>
+          </div>
           <button
             onClick={() => { setShowForm(true); setEditingId(null); }}
-            className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)]"
+            className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)]"
           >
             Add Service
           </button>
@@ -718,7 +709,7 @@ export default function AdminPage() {
                 </p>
                 <p className="mt-1 text-sm">
                   <span className="text-[var(--accent)]">
-                    {formatUsdCents(s.priceUsdCents)}/mo
+                    {formatUsdCents(s.priceUsdCents ?? 0)}/mo
                   </span>
                   <span className="text-[var(--muted)]">
                     {" "}
@@ -1110,6 +1101,13 @@ export default function AdminPage() {
       {/* Orders */}
       <section className="mt-16">
         <h2 className="text-xl font-semibold">Orders</h2>
+        <p className="mt-2 max-w-4xl text-xs text-[var(--muted)] leading-relaxed">
+          Override per VPS with <strong className="font-medium text-[var(--foreground)]">VPS OS templates</strong>.
+          Leave that unset to use <strong className="font-medium text-[var(--foreground)]">OS templates (global)</strong>{" "}
+          from Firestore, then{" "}
+          <code className="rounded bg-[var(--card)] px-1 font-mono text-[10px]">TEMPLATE_CATALOG_JSON</code>,
+          then legacy catalogue on the SKU.
+        </p>
         {provisionError && (
           <div className="mt-4 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm text-red-400">
             {provisionError}
@@ -1384,6 +1382,22 @@ export default function AdminPage() {
                     </td>
                     <td className="px-3 py-3">
                       <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const svc = services.find((x) => x.id === o.serviceId);
+                          setOrderTemplatesModal({
+                            orderId: o.id,
+                            profiles: o.imageProfiles ?? [],
+                            hint: svc
+                              ? `Plan SKU: ${svc.name}. Clear all rows & save to inherit host / plan defaults.`
+                              : undefined,
+                          });
+                        }}
+                        className="rounded border border-[var(--card-border)] px-2 py-1 text-xs hover:bg-[var(--card)]"
+                      >
+                        VPS OS templates
+                      </button>
                       {(o.status === "pending" || o.status === "provisioning") && (
                         <div className="flex flex-wrap items-center gap-2">
                           <input
@@ -1537,7 +1551,6 @@ export default function AdminPage() {
           dialogRef={adminDeleteDialogRef}
           orderIdRef={adminDeleteOrderRef}
           userPublicKey={user.publicKey}
-          isAdmin
           onSuccess={() => {
             adminDeleteOrderRef.current = null;
             loadData();
@@ -1545,6 +1558,17 @@ export default function AdminPage() {
           onDismiss={() => {
             adminDeleteOrderRef.current = null;
           }}
+        />
+      ) : null}
+
+      {orderTemplatesModal ? (
+        <OrderTemplatesModal
+          open
+          orderId={orderTemplatesModal.orderId}
+          initialProfiles={orderTemplatesModal.profiles}
+          summaryHint={orderTemplatesModal.hint}
+          onSaved={() => loadData()}
+          onClose={() => setOrderTemplatesModal(null)}
         />
       ) : null}
 

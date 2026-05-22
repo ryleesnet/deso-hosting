@@ -25,15 +25,12 @@ type RenewQuote = {
   subscriptionStatus: string;
 };
 
-export function RenewSubscriptionPanel({
-  orderId,
-  userPublicKey,
-  onSuccess,
-}: {
+export function RenewSubscriptionPanel(props: {
   orderId: string;
   userPublicKey: string;
   onSuccess?: () => void;
 }) {
+  const { orderId, onSuccess } = props;
   const payee = getDesoPaymentRecipientPublicKey();
   const [months, setMonths] = useState(1);
   const [quote, setQuote] = useState<RenewQuote | null>(null);
@@ -58,7 +55,7 @@ export function RenewSubscriptionPanel({
         setError(e instanceof Error ? e.message : "Could not load quote");
       })
       .finally(() => setLoading(false));
-  }, [orderId, userPublicKey, months]);
+  }, [orderId, months]);
 
   useEffect(() => {
     if (open) loadQuote();

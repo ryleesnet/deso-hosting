@@ -27,7 +27,10 @@ export function CancelVpsButton({
   const [vmRunning, setVmRunning] = useState(false);
   const deleteDialogRef = useRef<HTMLDialogElement>(null);
   const orderIdRef = useRef<string | null>(null);
-  orderIdRef.current = orderId;
+
+  useEffect(() => {
+    orderIdRef.current = orderId;
+  }, [orderId]);
 
   const refresh = useCallback(async () => {
     if (!shouldCheckPower) {
@@ -47,7 +50,9 @@ export function CancelVpsButton({
   }, [orderId, shouldCheckPower]);
 
   useEffect(() => {
-    void refresh();
+    queueMicrotask(() => {
+      void refresh();
+    });
     if (!shouldCheckPower) return;
     const id = setInterval(() => void refresh(), 15_000);
     return () => clearInterval(id);
@@ -80,7 +85,6 @@ export function CancelVpsButton({
         dialogRef={deleteDialogRef}
         orderIdRef={orderIdRef}
         userPublicKey={userPublicKey}
-        isAdmin={false}
         onSuccess={onSuccess}
       />
     </>

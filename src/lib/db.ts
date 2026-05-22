@@ -9,6 +9,21 @@ const COL_SERVICES = "services";
 const COL_ORDERS = "orders";
 const COL_SUBSCRIPTIONS = "subscriptions";
 const COL_RENEWAL_TXS = "renewal_txs";
+/** Global QEMU templates (label → Proxmox template VMID) shown at checkout and reinstall. */
+const COL_OS_TEMPLATES = "os_templates";
+
+const OS_TEMPLATE_ID_RE = /^[a-z][a-z0-9_-]{0,62}$/i;
+const MAX_HOSTED_OS_TEMPLATES = 100;
+
+/** Assignable QEMU template (clone source) for checkout / reinstall; stored per plan or per order. */
+export type ServiceImageProfile = {
+  /** Stable slug for APIs (Firestore-safe id). */
+  id: string;
+  /** Display name for checkout / dashboard / reinstall. */
+  label: string;
+  /** Source QEMU VMID (template guest) on Proxmox. */
+  templateVmid: number;
+};
 
 export interface VPSService {
   id: string;
@@ -21,8 +36,14 @@ export interface VPSService {
   priceUsdCents?: number;
   /** @deprecated Legacy: DeSo nanos/mo when priceUsdCents was not used. */
   priceNanos?: number;
-  proxmoxTemplate?: number; // VM template ID to clone
+  /** @deprecated Prefer `TEMPLATE_CATALOG_JSON` or OS templates on individual orders (`orders.imageProfiles`). */
+  proxmoxTemplate?: number;
   proxmoxNode?: string;
+  /**
+   * @deprecated Prefer storing OS templates per order (`orders.imageProfiles`)
+   * or defining `TEMPLATE_CATALOG_JSON` in the environment instead of catalogue plans.
+   */
+  imageProfiles?: ServiceImageProfile[];
   active: boolean;
   createdAt: string;
 }
@@ -44,6 +65,17 @@ export interface Order {
   vmLoginPassword?: string;
   /** Additional data disks beyond the plan root disk, sizes in GB (Proxmox). */
   extraDisksGb?: number[];
+  /**
+   * Proxmox template VMID this guest was cloned from after the last successful provision or reinstall.
+   */
+  cloneTemplateVmid?: number;
+  /** Matches `cloneTemplateVmid` / `orders.imageProfiles[].id`, when known. */
+  cloneImageProfileId?: string;
+  /**
+   * Per-VPS override for clone/reinstall catalogue. When empty/absent the host uses the global list
+   * in Firestore `os_templates`, then `TEMPLATE_CATALOG_JSON`, then legacy plan fields on the SKU.
+   */
+  imageProfiles?: ServiceImageProfile[];
   /** Static public IPv4 from the pool (Proxmox cloud-init ipconfig0). */
   publicIpv4?: string;
   /**
@@ -355,4 +387,262 @@ export async function commitSubscriptionRenewalWithTxRecord(params: {
 
     return "applied";
   });
+}
+
+// --- Global OS templates (Firestore `os_templates`) — checkout / reinstall catalogue
+
+/** Admin row plus {@link ServiceImageProfile} shaped fields (document id == `id`). */
+export type HostedOsTemplateRecord = ServiceImageProfile & {
+  active: boolean;
+  sortOrder: number;
+  createdAt: string;
+};
+
+let hostedOsTemplatesCache: {
+  at: number;
+  data: ServiceImageProfile[];
+} | null = null;
+
+const HOSTED_OS_TEMPLATES_CACHE_MS = 30_000;
+
+function invalidateHostedOsTemplatesCache(): void {
+  hostedOsTemplatesCache = null;
+}
+
+function parseHostedTemplateDoc(
+  docId: string,
+  raw: Record<string, unknown>
+): HostedOsTemplateRecord | null {
+  if (!OS_TEMPLATE_ID_RE.test(docId)) return null;
+  const label =
+    typeof raw.label === "string"
+      ? raw.label.trim().slice(0, 160)
+      : "";
+  const tvmidRaw = raw.templateVmid;
+  const templateVmid =
+    typeof tvmidRaw === "number"
+      ? Math.floor(tvmidRaw)
+      : parseInt(String(tvmidRaw ?? "").trim(), 10);
+  if (!label || !Number.isFinite(templateVmid) || templateVmid <= 0)
+    return null;
+  const active = raw.active !== false;
+  const sortOrderRaw = raw.sortOrder;
+  const sortOrder =
+    typeof sortOrderRaw === "number" && Number.isFinite(sortOrderRaw)
+      ? sortOrderRaw
+      : typeof sortOrderRaw === "string"
+        ? parseInt(sortOrderRaw, 10)
+        : 0;
+  const sortOrderSan = Number.isFinite(sortOrder) ? sortOrder : 0;
+  const createdAt =
+    typeof raw.createdAt === "string"
+      ? raw.createdAt
+      : new Date().toISOString();
+  return {
+    id: docId,
+    label,
+    templateVmid,
+    active,
+    sortOrder: sortOrderSan,
+    createdAt,
+  };
+}
+
+/** Active profiles for checkout/API (sorted). Short-TTL memoized inside this process. */
+export async function readActiveOsTemplateProfiles(): Promise<ServiceImageProfile[]> {
+  const now = Date.now();
+  if (
+    hostedOsTemplatesCache &&
+    now - hostedOsTemplatesCache.at < HOSTED_OS_TEMPLATES_CACHE_MS
+  ) {
+    return hostedOsTemplatesCache.data;
+  }
+  const snap = await db().collection(COL_OS_TEMPLATES).get();
+  const rows = snap.docs
+    .map((d) => parseHostedTemplateDoc(d.id, d.data() as Record<string, unknown>))
+    .filter((r): r is HostedOsTemplateRecord => r !== null && r.active)
+    .sort(
+      (a, b) =>
+        a.sortOrder - b.sortOrder ||
+        a.label.localeCompare(b.label) ||
+        a.id.localeCompare(b.id)
+    )
+    .map(({ id, label, templateVmid }) => ({ id, label, templateVmid }));
+
+  hostedOsTemplatesCache = { at: now, data: rows };
+  return rows;
+}
+
+/** Full list including inactive templates (Admin UI). */
+export async function listHostedOsTemplatesAdmin(): Promise<
+  HostedOsTemplateRecord[]
+> {
+  const snap = await db().collection(COL_OS_TEMPLATES).get();
+  const rows = snap.docs
+    .map((d) => parseHostedTemplateDoc(d.id, d.data() as Record<string, unknown>))
+    .filter((r): r is HostedOsTemplateRecord => r !== null)
+    .sort(
+      (a, b) =>
+        a.sortOrder - b.sortOrder ||
+        a.label.localeCompare(b.label) ||
+        a.id.localeCompare(b.id)
+    );
+  return rows;
+}
+
+async function vmidTakenInHostedTemplates(
+  templateVmid: number,
+  excludeDocId?: string
+): Promise<boolean> {
+  const snap = await db().collection(COL_OS_TEMPLATES).get();
+  const t = Math.floor(templateVmid);
+  for (const d of snap.docs) {
+    if (excludeDocId && d.id === excludeDocId) continue;
+    const row = parseHostedTemplateDoc(d.id, d.data() as Record<string, unknown>);
+    if (!row) continue;
+    if (row.templateVmid === t) return true;
+  }
+  return false;
+}
+
+export async function createHostedOsTemplate(params: {
+  id: string;
+  label: string;
+  templateVmid: number;
+  active?: boolean;
+  sortOrder?: number;
+}): Promise<HostedOsTemplateRecord | { error: string }> {
+  const id = params.id.trim().toLowerCase();
+  if (!OS_TEMPLATE_ID_RE.test(id)) {
+    return {
+      error:
+        'Template id must start with a letter and use only letters, numbers, underscores, and hyphens (max 63 chars after the first letter).',
+    };
+  }
+  const label = params.label.trim().slice(0, 160);
+  const tvmid = Math.floor(Number(params.templateVmid));
+  if (!label || !Number.isFinite(tvmid) || tvmid <= 0) {
+    return { error: "Label and positive template VMID are required." };
+  }
+  const ref = db().collection(COL_OS_TEMPLATES).doc(id);
+  const exists = await ref.get();
+  if (exists.exists) return { error: `Template id "${id}" already exists.` };
+
+  const countSnap = await db()
+    .collection(COL_OS_TEMPLATES)
+    .limit(MAX_HOSTED_OS_TEMPLATES + 1)
+    .get();
+  if (countSnap.docs.length >= MAX_HOSTED_OS_TEMPLATES) {
+    return {
+      error: `At most ${MAX_HOSTED_OS_TEMPLATES} global OS templates are allowed.`,
+    };
+  }
+
+  const active = params.active !== false;
+  const sortOrder =
+    params.sortOrder != null && Number.isFinite(Number(params.sortOrder))
+      ? Math.floor(Number(params.sortOrder))
+      : 0;
+  const createdAt = new Date().toISOString();
+
+  if (await vmidTakenInHostedTemplates(tvmid)) {
+    return { error: "Another OS template already uses this Proxmox VMID." };
+  }
+
+  await ref.set(
+    forFirestore({
+      label,
+      templateVmid: tvmid,
+      active,
+      sortOrder,
+      createdAt,
+    })
+  );
+  invalidateHostedOsTemplatesCache();
+  return {
+    id,
+    label,
+    templateVmid: tvmid,
+    active,
+    sortOrder,
+    createdAt,
+  };
+}
+
+export async function updateHostedOsTemplate(
+  id: string,
+  updates: Partial<{
+    label: string;
+    templateVmid: number;
+    active: boolean;
+    sortOrder: number;
+  }>
+): Promise<HostedOsTemplateRecord | { error: string } | undefined> {
+  const docId = id.trim().toLowerCase();
+  if (!OS_TEMPLATE_ID_RE.test(docId)) return { error: "Invalid template id." };
+  const ref = db().collection(COL_OS_TEMPLATES).doc(docId);
+  const cur = await ref.get();
+  if (!cur.exists) return undefined;
+  const curRow = parseHostedTemplateDoc(docId, cur.data() as Record<string, unknown>);
+  if (!curRow) return { error: "Corrupt OS template row." };
+
+  let label = curRow.label;
+  if (typeof updates.label === "string") {
+    label = updates.label.trim().slice(0, 160);
+  }
+  let templateVmid = curRow.templateVmid;
+  if (updates.templateVmid != null) {
+    const tvmid = Math.floor(Number(updates.templateVmid));
+    if (!Number.isFinite(tvmid) || tvmid <= 0) {
+      return { error: "templateVmid must be a positive integer." };
+    }
+    templateVmid = tvmid;
+  }
+  const active =
+    typeof updates.active === "boolean" ? updates.active : curRow.active;
+  const sortOrder =
+    updates.sortOrder != null && Number.isFinite(Number(updates.sortOrder))
+      ? Math.floor(Number(updates.sortOrder))
+      : curRow.sortOrder;
+
+  if (!label) return { error: "Label cannot be empty." };
+
+  if (await vmidTakenInHostedTemplates(templateVmid, docId)) {
+    return { error: "Another OS template already uses this Proxmox VMID." };
+  }
+
+  const merged: HostedOsTemplateRecord = {
+    id: docId,
+    label,
+    templateVmid,
+    active,
+    sortOrder,
+    createdAt: curRow.createdAt,
+  };
+
+  await ref.set(
+    forFirestore({
+      label,
+      templateVmid,
+      active,
+      sortOrder,
+      createdAt: curRow.createdAt,
+    }),
+    { merge: true }
+  );
+  invalidateHostedOsTemplatesCache();
+  return merged;
+}
+
+export async function deleteHostedOsTemplate(
+  id: string
+): Promise<boolean> {
+  const docId = id.trim().toLowerCase();
+  if (!OS_TEMPLATE_ID_RE.test(docId)) return false;
+  const ref = db().collection(COL_OS_TEMPLATES).doc(docId);
+  const cur = await ref.get();
+  if (!cur.exists) return false;
+  await ref.delete();
+  invalidateHostedOsTemplatesCache();
+  return true;
 }

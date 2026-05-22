@@ -4,6 +4,7 @@ import {
   getOrder,
   addOrder,
   updateOrder,
+  readActiveOsTemplateProfiles,
 } from "@/lib/db";
 import {
   cloneVM,
@@ -28,6 +29,12 @@ import {
   provisionErrorMessage,
   resolveProvisionTarget,
 } from "@/lib/order-provision";
+import {
+  resolveCloneChoiceFromBody,
+  effectiveTemplatesForCheckout,
+  effectiveTemplatesForOrder,
+  profileByTemplateVmidInList,
+} from "@/lib/image-profiles";
 import { requireUser } from "@/lib/api-auth";
 import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
 
@@ -41,7 +48,12 @@ async function finalizeProvision(orderId: string) {
     await updateOrder(orderId, { status: "pending" });
     return;
   }
-  const target = resolveProvisionTarget(service);
+  const hostedProfiles = await readActiveOsTemplateProfiles();
+  const target = resolveProvisionTarget(
+    service,
+    order.cloneTemplateVmid ?? null,
+    effectiveTemplatesForOrder(order, service, hostedProfiles)
+  );
   if (!target) {
     await updateOrder(orderId, { status: "pending" });
     return;
@@ -104,7 +116,18 @@ async function finalizeProvision(orderId: string) {
 
   // Clone succeeded — record the VM on the order *before* configuring it so that any
   // subsequent failure does not orphan the VM in PVE; the user can retry from the dashboard.
-  await updateOrder(orderId, { vmid: newVmid, node: targetNode });
+  const profilesForCatalog = effectiveTemplatesForOrder(
+    order,
+    service,
+    hostedProfiles
+  );
+  const cloneMeta = profileByTemplateVmidInList(profilesForCatalog, provisionTemplateVmid);
+  await updateOrder(orderId, {
+    vmid: newVmid,
+    node: targetNode,
+    cloneTemplateVmid: provisionTemplateVmid,
+    ...(cloneMeta ? { cloneImageProfileId: cloneMeta.id } : {}),
+  });
 
   if (await isPublicIpPoolConfigured()) {
     try {
@@ -152,6 +175,8 @@ export async function POST(req: NextRequest) {
       sshAccess,
       sshPublicKey,
       acceptedTermsRevision,
+      imageProfileId,
+      templateVmid,
     } = body as {
       serviceId?: string;
       desoUsername?: string;
@@ -159,6 +184,8 @@ export async function POST(req: NextRequest) {
       sshAccess?: unknown;
       sshPublicKey?: unknown;
       acceptedTermsRevision?: unknown;
+      imageProfileId?: unknown;
+      templateVmid?: unknown;
     };
 
     if (acceptedTermsRevision !== ORDER_TERMS_REVISION) {
@@ -189,7 +216,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Service is not available" }, { status: 400 });
     }
 
-    const target = resolveProvisionTarget(service);
+    const hosted = await readActiveOsTemplateProfiles();
+    const profilesList = effectiveTemplatesForCheckout(service, hosted);
+    const cloneExtras: {
+      cloneTemplateVmid?: number;
+      cloneImageProfileId?: string;
+    } = {};
+    let cloneTemplatePrefer: number | null = null;
+    if (profilesList.length > 0) {
+      const clonePick = resolveCloneChoiceFromBody(
+        profilesList,
+        { imageProfileId, templateVmid },
+        { allowDefaultFallback: true }
+      );
+      if (!clonePick) {
+        return NextResponse.json(
+          { error: "Invalid operating system template for this host." },
+          { status: 400 }
+        );
+      }
+      cloneExtras.cloneTemplateVmid = clonePick.templateVmid;
+      cloneExtras.cloneImageProfileId = clonePick.profile.id;
+      cloneTemplatePrefer = clonePick.templateVmid;
+    }
+
+    const target = resolveProvisionTarget(service, cloneTemplatePrefer ?? null, profilesList);
 
     let desoHandle: string | undefined =
       typeof desoUsername === "string" && desoUsername.trim()
@@ -256,6 +307,7 @@ export async function POST(req: NextRequest) {
         ...credentials,
         ...(normalizedExtra.length > 0 ? { extraDisksGb: normalizedExtra } : {}),
         ...orderSshFields,
+        ...(Object.keys(cloneExtras).length > 0 ? cloneExtras : {}),
       });
 
       after(() => {

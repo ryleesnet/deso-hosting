@@ -5,8 +5,10 @@ import {
   getSubscriptionByOrder,
   updateOrder,
   updateSubscription,
+  readActiveOsTemplateProfiles,
   type Order,
   type VPSService,
+  type ServiceImageProfile,
 } from "@/lib/db";
 import {
   applyServiceHardwareToVM,
@@ -23,38 +25,65 @@ import {
 import {
   cloudInitNetworkForIp,
   getPublicIpNameserverParam,
-  type CloudInitPublicNetwork,
 } from "@/lib/public-ip-pool";
 import { updatePublicIpMachineForOrder } from "@/lib/public-ip-store";
 import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
 import { privateLanPrefixLen } from "@/lib/private-user-lan";
+import {
+  resolveCloneChoiceForReinstall,
+  effectiveTemplatesForOrder,
+  profileByTemplateVmidInList,
+  type ReinstallCloneBody,
+} from "@/lib/image-profiles";
 
 /**
- * Resolve the Proxmox node + template that should be used to provision a service order.
- * Falls back to PROXMOX_DEFAULT_NODE / PROXMOX_DEFAULT_TEMPLATE_VMID env vars when the
- * service record itself does not carry those fields (admin form leaves them optional).
+ * Resolve the Proxmox node + template VMID used to clone a guest for an order.
+ * When `templateCatalog` is non-empty it drives which VMIDs are acceptable;
+ * otherwise `service.proxmoxTemplate` and env `PROXMOX_DEFAULT_TEMPLATE_VMID`
+ * remain the fallback (`templateCatalog` is usually from `effectiveTemplatesForOrder`).
  */
-export function resolveProvisionTarget(service: VPSService): {
+export function resolveProvisionTarget(
+  service: VPSService,
+  cloneTemplatePreferred: number | null | undefined,
+  templateCatalog: ServiceImageProfile[]
+): {
   node: string;
   templateVmid: number;
 } | null {
   const envNode = process.env.PROXMOX_DEFAULT_NODE?.trim() || "";
-  const envTemplateRaw = process.env.PROXMOX_DEFAULT_TEMPLATE_VMID?.trim() || "";
+  const envTemplateRaw =
+    process.env.PROXMOX_DEFAULT_TEMPLATE_VMID?.trim() || "";
   const envTemplate = parseInt(envTemplateRaw, 10);
 
   const node = service.proxmoxNode?.trim() || envNode;
-  const templateVmid =
-    service.proxmoxTemplate != null && service.proxmoxTemplate > 0
-      ? service.proxmoxTemplate
-      : Number.isFinite(envTemplate) && envTemplate > 0
-        ? envTemplate
-        : 0;
+
+  let templateVmid = 0;
+  const profiles = templateCatalog;
+  const pref =
+    cloneTemplatePreferred != null &&
+    Number.isFinite(cloneTemplatePreferred) &&
+    cloneTemplatePreferred > 0
+      ? Math.floor(Number(cloneTemplatePreferred))
+      : null;
+
+  if (profiles.length > 0) {
+    const hit =
+      pref != null ? profiles.find((p) => p.templateVmid === pref) : null;
+    templateVmid = hit ? hit.templateVmid : profiles[0]!.templateVmid;
+  } else if (service.proxmoxTemplate != null && service.proxmoxTemplate > 0) {
+    templateVmid = service.proxmoxTemplate;
+  } else if (
+    Number.isFinite(envTemplate) &&
+    envTemplate > 0
+  ) {
+    templateVmid = envTemplate;
+  }
 
   if (!node || templateVmid <= 0) {
     console.warn(
       `[provision] cannot auto-provision service ${service.id}: ` +
         `node=${node || "(missing)"} template=${templateVmid || "(missing)"}. ` +
-        `Set proxmoxNode + proxmoxTemplate on the service or PROXMOX_DEFAULT_NODE / PROXMOX_DEFAULT_TEMPLATE_VMID in env.`
+        `Set OS templates per order, TEMPLATE_CATALOG_JSON / legacy imageProfiles on services, proxmoxTemplate, or PROXMOX_DEFAULT_* in env.`
     );
     return null;
   }
@@ -364,13 +393,16 @@ function destroyNotFoundOk(err: unknown): boolean {
 }
 
 /**
- * Destroy the current VM, clone a fresh full VM from the service template, then re-apply
+ * Destroy the current VM, clone a fresh full VM from the chosen catalogue image, then re-apply
  * the same plan (CPU/RAM/disk), cloud-init (credentials, IP, SSH keys), and extra disks.
  * Public IPv4 on the order is kept. Subscriptions are unchanged.
  *
- * The HTTP reinstall route sets `provisioning` and runs this in the background.
+ * Runs in HTTP `after()` (clone can take many minutes). Caller should set provisioning state.
  */
-export async function replaceOrderVmFromTemplate(orderId: string): Promise<void> {
+export async function replaceOrderVmFromTemplate(
+  orderId: string,
+  reinstallBody?: ReinstallCloneBody
+): Promise<void> {
   const order = await getOrder(orderId);
   if (!order) throw new Error(`Order ${orderId} not found`);
   if (order.status === "cancelled") {
@@ -386,19 +418,43 @@ export async function replaceOrderVmFromTemplate(orderId: string): Promise<void>
   const service = await getService(order.serviceId);
   if (!service) throw new Error(`Service ${order.serviceId} not found`);
 
-  const target = resolveProvisionTarget(service);
+  const hosted = await readActiveOsTemplateProfiles();
+  const profiles = effectiveTemplatesForOrder(order, service, hosted);
+
+  let reinstallChoiceResolved:
+    | { profile: ServiceImageProfile; templateVmid: number }
+    | null = null;
+  if (profiles.length > 0) {
+    reinstallChoiceResolved = resolveCloneChoiceForReinstall(
+      profiles,
+      order,
+      reinstallBody ?? {}
+    );
+    if (!reinstallChoiceResolved) {
+      throw new Error(
+        "Pick a valid operating system image from your plan — that image is not offered for reinstall."
+      );
+    }
+  }
+
+  const target = resolveProvisionTarget(
+    service,
+    reinstallChoiceResolved?.templateVmid ?? null,
+    profiles
+  );
   if (!target) {
     throw new Error(
-      "Provisioning target not configured (set template/node on the service or env defaults)."
+      "Provisioning target not configured (set VPS OS templates / TEMPLATE_CATALOG_JSON / legacy service fields / env defaults)."
     );
   }
+  const cloneProfileStored =
+    reinstallChoiceResolved?.profile.id ??
+    profileByTemplateVmidInList(profiles, target.templateVmid)?.id;
 
   const previousStatus = order.status;
   const oldNode = order.node;
   const provisionNode = target.node;
   const provisionTemplateVmid = target.templateVmid;
-
-  await updateOrder(orderId, { status: "provisioning", provisionError: "" });
 
   try {
     await stopVmGracefully(oldNode, order.vmid);
@@ -446,7 +502,12 @@ export async function replaceOrderVmFromTemplate(orderId: string): Promise<void>
       }
     }
 
-    await updateOrder(orderId, { vmid: newVmid, node: targetNode });
+    await updateOrder(orderId, {
+      vmid: newVmid,
+      node: targetNode,
+      cloneTemplateVmid: provisionTemplateVmid,
+      ...(cloneProfileStored !== undefined ? { cloneImageProfileId: cloneProfileStored } : {}),
+    });
 
     await configureProvisionedVM(orderId);
 

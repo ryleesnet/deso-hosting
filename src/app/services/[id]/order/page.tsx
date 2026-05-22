@@ -17,6 +17,7 @@ import {
 } from "@/lib/extra-disks";
 import { apiFetch } from "@/lib/api-client";
 import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
+import { effectiveTemplatesForCheckout } from "@/lib/image-profiles";
 
 const PAYMENT_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_DESO_PAYMENT_PUBLIC_KEY || "";
@@ -40,6 +41,8 @@ type OrderService = {
   priceUsdCents: number;
   pricePreviewNanos?: number;
   desoRateSource?: string;
+  proxmoxTemplate?: number;
+  imageProfiles?: { id: string; label: string; templateVmid: number }[];
 };
 
 function parseEnvInt(raw: string | undefined, fallback: number): number {
@@ -86,6 +89,41 @@ export default function OrderPage() {
   } | null>(null);
   const [orderKeyCopyHint, setOrderKeyCopyHint] = useState<string | null>(null);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  /** Catalogue image profile ID for provisioning (ignored when plan has ≤1 implicit image). */
+  const [selectedImageProfileId, setSelectedImageProfileId] = useState("");
+  /** Global catalogue from `/api/os-templates` (Firestore). */
+  const [hostedProfiles, setHostedProfiles] = useState<
+    { id: string; label: string; templateVmid: number }[]
+  >([]);
+
+  const imageProfilesCatalog = useMemo(
+    () =>
+      service ? effectiveTemplatesForCheckout(service, hostedProfiles) : [],
+    [service, hostedProfiles]
+  );
+
+  useEffect(() => {
+    fetch("/api/os-templates")
+      .then((r) => r.json())
+      .then((d) =>
+        setHostedProfiles(
+          Array.isArray((d as { profiles?: unknown }).profiles)
+            ? (d as { profiles: { id: string; label: string; templateVmid: number }[] })
+                .profiles
+            : []
+        )
+      )
+      .catch(() => setHostedProfiles([]));
+  }, []);
+
+  useEffect(() => {
+    if (!service) return;
+    const profiles = effectiveTemplatesForCheckout(service, hostedProfiles);
+    const firstId = profiles[0]?.id ?? "";
+    setSelectedImageProfileId((prev) =>
+      prev && profiles.some((p) => p.id === prev) ? prev : firstId
+    );
+  }, [service, hostedProfiles]);
 
   const maxExtraCount = useMemo(
     () =>
@@ -175,6 +213,16 @@ export default function OrderPage() {
       return;
     }
 
+    const profilesCheckout = effectiveTemplatesForCheckout(service, hostedProfiles);
+    if (
+      profilesCheckout.length > 0 &&
+      (!selectedImageProfileId ||
+        !profilesCheckout.some((p) => p.id === selectedImageProfileId))
+    ) {
+      setError("Choose an operating system image for this VPS.");
+      return;
+    }
+
     const totalUsdCents =
       service.priceUsdCents + extraDisksAddonUsdCents(extraDisksGb);
 
@@ -218,6 +266,12 @@ export default function OrderPage() {
           txHash: txHash || undefined,
           desoUsername: user.username,
           extraDisksGb: extraDisksGb.length ? extraDisksGb : undefined,
+          ...(profilesCheckout.length
+            ? {
+                imageProfileId:
+                  selectedImageProfileId || profilesCheckout[0]!.id,
+              }
+            : {}),
           sshAccess: sshAccess === "none" ? "none" : sshAccess,
           sshPublicKey:
             sshAccess === "paste" ? sshPublicKeyDraft.trim() : undefined,
@@ -421,6 +475,45 @@ export default function OrderPage() {
             <p className="mt-2 text-xs text-red-400">{quoteError}</p>
           )}
         </div>
+
+        {imageProfilesCatalog.length > 0 ? (
+          <div className="mt-6 border-t border-[var(--card-border)] pt-4">
+            <h4 className="text-sm font-semibold text-[var(--foreground)]">
+              Operating system
+            </h4>
+            <p className="mt-1 text-xs text-[var(--muted)]">Available Options</p>
+            {imageProfilesCatalog.length === 1 ? (
+              <p className="mt-2 text-sm text-[var(--foreground)]">
+                {imageProfilesCatalog[0]!.label}
+              </p>
+            ) : (
+              <div className="mt-3">
+                <label htmlFor="checkout-os-image" className="sr-only">
+                  Operating system image
+                </label>
+                <select
+                  id="checkout-os-image"
+                  value={
+                    selectedImageProfileId ||
+                    imageProfilesCatalog[0]?.id ||
+                    ""
+                  }
+                  onChange={(e) => {
+                    setSelectedImageProfileId(e.target.value);
+                    setError(null);
+                  }}
+                  className="w-full max-w-md rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+                >
+                  {imageProfilesCatalog.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+        ) : null}
 
         <div className="mt-6 border-t border-[var(--card-border)] pt-4">
           <h4 className="text-sm font-semibold text-[var(--foreground)]">

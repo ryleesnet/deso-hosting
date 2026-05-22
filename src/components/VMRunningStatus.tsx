@@ -48,7 +48,10 @@ export function VMRunningStatus({
       : "rounded-full px-3 py-0.5 text-xs font-semibold uppercase tracking-wide";
   const [display, setDisplay] = useState<DisplayState>("loading");
   const onSyncedRef = useRef(onPendingPowerSynced);
-  onSyncedRef.current = onPendingPowerSynced;
+
+  useEffect(() => {
+    onSyncedRef.current = onPendingPowerSynced;
+  }, [onPendingPowerSynced]);
 
   useEffect(() => {
     let cancelled = false;

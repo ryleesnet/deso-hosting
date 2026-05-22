@@ -98,11 +98,13 @@ export function VNCViewer({ orderId, publicKey, onConnect, onDisconnect, onError
         rfb.resizeSession = true;
 
         rfb.addEventListener("connect", () => mounted && onConnect());
-        rfb.addEventListener("disconnect", (ev: { detail?: { clean?: boolean } }) => {
+        rfb.addEventListener("disconnect", (...args: unknown[]) => {
+          const ev = args[0] as { detail?: { clean?: boolean } };
           alreadyDisconnected = true;
           if (mounted && !ev.detail?.clean) onDisconnect("Console disconnected unexpectedly");
         });
-        rfb.addEventListener("securityfailure", (ev: { detail?: { status?: string } }) => {
+        rfb.addEventListener("securityfailure", (...args: unknown[]) => {
+          const ev = args[0] as { detail?: { status?: string } };
           if (mounted) onError(`Security failure: ${ev.detail?.status || "unknown"}`);
         });
         rfb.addEventListener("serververification", () => rfb.approveServer());

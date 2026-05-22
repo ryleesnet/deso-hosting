@@ -8,6 +8,7 @@ import {
   useId,
   type ReactNode,
 } from "react";
+import { DangerZoneCollapsible } from "@/components/DangerZoneCollapsible";
 import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api-client";
@@ -162,17 +163,15 @@ function VmPowerMenu({
   items: VmPowerMenuItem[];
 }) {
   const [open, setOpen] = useState(false);
+  /** Avoid effects that close-on-disable; derives visibility and listener wiring. */
+  const menuVisible = open && !disabled;
   const rootRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
 
   const close = useCallback(() => setOpen(false), []);
 
   useEffect(() => {
-    if (disabled) setOpen(false);
-  }, [disabled]);
-
-  useEffect(() => {
-    if (!open) return;
+    if (!menuVisible) return;
 
     const onPointerDown = (e: PointerEvent) => {
       const el = rootRef.current;
@@ -189,7 +188,7 @@ function VmPowerMenu({
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [open, close]);
+  }, [menuVisible, close]);
 
   return (
     <div className="relative inline-block align-top" ref={rootRef}>
@@ -198,7 +197,7 @@ function VmPowerMenu({
         className={`inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50 ${triggerClassName} ${
           isLoading ? "animate-pulse" : ""
         }`}
-        aria-expanded={open}
+        aria-expanded={menuVisible}
         aria-haspopup="menu"
         aria-controls={menuId}
         disabled={disabled}
@@ -210,7 +209,7 @@ function VmPowerMenu({
       >
         <span>{isLoading ? loadingLabel : idleLabel}</span>
         <svg
-          className={`h-4 w-4 shrink-0 opacity-80 transition-transform ${open ? "rotate-180" : ""}`}
+          className={`h-4 w-4 shrink-0 opacity-80 transition-transform ${menuVisible ? "rotate-180" : ""}`}
           viewBox="0 0 20 20"
           fill="currentColor"
           aria-hidden
@@ -222,7 +221,7 @@ function VmPowerMenu({
           />
         </svg>
       </button>
-      {open && !disabled ? (
+      {menuVisible ? (
         <div
           id={menuId}
           role="menu"
@@ -366,7 +365,7 @@ export function VPSControl({
   const offHint = "VM is off — start it first";
 
   const linkBase =
-    "flex w-full items-center justify-center rounded-lg border border-[var(--accent)]/50 px-3 py-1.5 text-sm text-[var(--accent)]";
+    "flex w-full items-center justify-center rounded-lg border border-[var(--accent)]/50 bg-[var(--accent)]/15 px-3 py-1.5 text-sm text-[var(--accent)]";
 
   const hwLocked = powerLocked;
   const lockExplain = hwLocked
@@ -467,12 +466,11 @@ export function VPSControl({
             ]}
           />
         </div>
-        <div className="grid min-w-0 grid-cols-2 gap-2">{deleteButton}</div>
         <div className="min-w-0">
           {isRunning && !hwLocked ? (
             <Link
               href={`/dashboard/${orderId}/console`}
-              className={`${linkBase} hover:bg-[var(--accent)]/10`}
+              className={`${linkBase} hover:bg-[var(--accent)]/25`}
             >
               Console
             </Link>
@@ -483,12 +481,17 @@ export function VPSControl({
               title={
                 hwLocked ? lockExplain : offHint
               }
-              className={`${linkBase} cursor-not-allowed bg-transparent disabled:opacity-50`}
+              className={`${linkBase} cursor-not-allowed disabled:opacity-50`}
             >
               Console
             </button>
           )}
         </div>
+        {deleteButton ? (
+          <DangerZoneCollapsible>
+            <div className="grid min-w-0 grid-cols-2 gap-2">{deleteButton}</div>
+          </DangerZoneCollapsible>
+        ) : null}
         </div>
         {actionError && (
           <p className="text-sm text-red-400" role="alert">

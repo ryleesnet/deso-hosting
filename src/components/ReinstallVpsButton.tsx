@@ -1,10 +1,23 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-client";
+
+/** Matches server `imageProfiles`; avoid importing firebase-bound modules in the client bundle. */
+export type ClientImageProfile = {
+  id: string;
+  label: string;
+  templateVmid: number;
+};
 
 type Props = {
   orderId: string;
+  /** From catalogue service */
+  profiles: ClientImageProfile[];
+  /** Stored `cloneImageProfileId` on order (preferred default for picker). */
+  orderProfileId?: string;
+  /** Stored `cloneTemplateVmid` */
+  orderTemplateVmid?: number;
   onStarted?: () => void;
   disabled?: boolean;
   /** When true, button fills a grid cell (paired with Delete on the dashboard). */
@@ -12,31 +25,65 @@ type Props = {
 };
 
 /**
- * Reinstall confirmation uses the same &lt;dialog&gt; pattern as {@link DeleteVpsConfirmationDialog}
- * and force shutdown / restart in {@link VPSControl}.
+ * Reinstall confirmation — optionally pick clone source when profiles &gt; 1.
  */
-export function ReinstallVpsButton({ orderId, onStarted, disabled, fillCell }: Props) {
+export function ReinstallVpsButton({
+  orderId,
+  profiles,
+  orderProfileId,
+  orderTemplateVmid,
+  onStarted,
+  disabled,
+  fillCell,
+}: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const defaultProfileId = useMemo(() => {
+    if (!profiles.length) return "";
+    if (orderProfileId) {
+      const hit = profiles.find((p) => p.id === orderProfileId);
+      if (hit) return hit.id;
+    }
+    if (typeof orderTemplateVmid === "number" && orderTemplateVmid > 0) {
+      const hit = profiles.find((p) => p.templateVmid === orderTemplateVmid);
+      if (hit) return hit.id;
+    }
+    return profiles[0]!.id;
+  }, [profiles, orderProfileId, orderTemplateVmid]);
+
+  const [selectedProfileId, setSelectedProfileId] = useState(defaultProfileId);
+
   useEffect(() => {
     const el = dialogRef.current;
     if (!el) return;
-    const onClose = () => {
+    const onCloseEvt = () => {
       setBusy(false);
       setError(null);
     };
-    el.addEventListener("close", onClose);
-    return () => el.removeEventListener("close", onClose);
+    el.addEventListener("close", onCloseEvt);
+    return () => el.removeEventListener("close", onCloseEvt);
   }, []);
+
+  useEffect(() => {
+    setSelectedProfileId(defaultProfileId);
+  }, [defaultProfileId]);
 
   async function handleConfirm() {
     setError(null);
     setBusy(true);
     try {
+      const body =
+        profiles.length > 1
+          ? { imageProfileId: selectedProfileId }
+          : profiles.length === 1
+            ? { imageProfileId: profiles[0]!.id }
+            : {};
       const res = await apiFetch(`/api/orders/${orderId}/reinstall`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
       const data = (await res.json()) as { error?: string; message?: string };
       if (!res.ok) {
@@ -50,6 +97,8 @@ export function ReinstallVpsButton({ orderId, onStarted, disabled, fillCell }: P
       setBusy(false);
     }
   }
+
+  const showPick = profiles.length > 1;
 
   return (
     <>
@@ -85,13 +134,37 @@ export function ReinstallVpsButton({ orderId, onStarted, disabled, fillCell }: P
             <span className="font-medium text-[var(--foreground)]">
               permanently delete the current VM
             </span>{" "}
-            and create a new one from your plan&apos;s template with the same
-            CPU, RAM, disks, public IP, and login settings.{" "}
+            and clone a fresh one with the same plan resources, public IP, and login settings.{" "}
             <span className="font-medium text-[var(--foreground)]">
               All data on the current disk will be lost.
             </span>{" "}
             The process can take several minutes.
           </p>
+
+          {showPick ? (
+            <div className="rounded-lg border border-[var(--card-border)] bg-[var(--background)]/40 p-3">
+              <label
+                htmlFor="reinstall-image"
+                className="text-xs font-medium text-[var(--muted)]"
+              >
+                Operating system image
+              </label>
+              <select
+                id="reinstall-image"
+                value={selectedProfileId}
+                onChange={(e) => setSelectedProfileId(e.target.value)}
+                disabled={busy}
+                className="mt-2 w-full rounded-lg border border-[var(--card-border)] bg-[var(--card)] px-3 py-2 text-sm"
+              >
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label} (VMID {p.templateVmid})
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+
           {error ? (
             <p className="text-sm text-red-400" role="alert">
               {error}
@@ -110,7 +183,10 @@ export function ReinstallVpsButton({ orderId, onStarted, disabled, fillCell }: P
               type="button"
               className="rounded-lg bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-500 disabled:cursor-not-allowed disabled:opacity-50"
               onClick={() => void handleConfirm()}
-              disabled={busy}
+              disabled={
+                busy ||
+                (showPick && (!selectedProfileId || !profiles.some((p) => p.id === selectedProfileId)))
+              }
             >
               {busy ? "Starting…" : "Reinstall"}
             </button>

@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { getOrder, getService, updateOrder } from "@/lib/db";
+import { getOrder, getService, updateOrder, readActiveOsTemplateProfiles } from "@/lib/db";
 import { resolveProvisionTarget } from "@/lib/order-provision";
+import {
+  effectiveTemplatesForOrder,
+  type ReinstallCloneBody,
+} from "@/lib/image-profiles";
 import { requireUser } from "@/lib/api-auth";
 
 /**
- * User/admin: destroy the current QEMU guest, full-clone again from the catalogue template,
- * and re-apply hardware + cloud-init (same plan, IP, credentials, extra disks). Runs in the
- * background like initial provisioning (clone can take many minutes).
+ * User/admin: destroy the current QEMU guest, full-clone again from the selected catalogue image
+ * profile (when configured), then re-apply hardware + cloud-init (same plan, IP, credentials,
+ * extra disks). Runs in the background like initial provisioning (clone can take many minutes).
  */
 export async function POST(
   req: NextRequest,
@@ -17,6 +21,14 @@ export async function POST(
     if (!auth.ok) return auth.response;
 
     const { orderId } = await params;
+
+    let reinstallBody: ReinstallCloneBody = {};
+    try {
+      reinstallBody = (await req.json()) as ReinstallCloneBody;
+    } catch {
+      /* empty body OK — uses stored/default image */
+    }
+
     const order = await getOrder(orderId);
     if (!order) {
       return NextResponse.json({ error: "Order not found" }, { status: 404 });
@@ -57,22 +69,23 @@ export async function POST(
       return NextResponse.json({ error: "Service not found" }, { status: 404 });
     }
 
-    if (!resolveProvisionTarget(service)) {
+    const hostedProfiles = await readActiveOsTemplateProfiles();
+    const templates = effectiveTemplatesForOrder(order, service, hostedProfiles);
+    if (!resolveProvisionTarget(service, null, templates)) {
       return NextResponse.json(
         {
           error:
-            "Reinstall is not configured for this plan (missing template or node).",
+            "Reinstall is not configured — add active OS templates in Admin, configure this order, set TEMPLATE_CATALOG_JSON / legacy catalogue, or PROXMOX_* env defaults.",
         },
         { status: 400 }
       );
     }
-
     await updateOrder(orderId, { status: "provisioning", provisionError: "" });
 
     after(() => {
       void import("@/lib/order-provision")
         .then(({ replaceOrderVmFromTemplate }) =>
-          replaceOrderVmFromTemplate(orderId)
+          replaceOrderVmFromTemplate(orderId, reinstallBody)
         )
         .catch((err) => {
           console.error(`[orders/${orderId}/reinstall]`, err);
@@ -82,7 +95,7 @@ export async function POST(
     return NextResponse.json({
       success: true,
       message:
-        "Reinstall started. The VM is being replaced with a fresh image from your plan template. This page will update automatically.",
+        "Reinstall started. The VM is being replaced from your selected image profile. This page will update automatically.",
     });
   } catch (err) {
     console.error(err);

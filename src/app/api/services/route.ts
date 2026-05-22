@@ -3,6 +3,7 @@ import { getServices, addService } from "@/lib/db";
 import { enrichServicesForPublic } from "@/lib/service-pricing";
 import { normalizeRamMb } from "@/lib/service-ram";
 import { requireAdmin, requireUser } from "@/lib/api-auth";
+import { sanitizeImageProfilesInput } from "@/lib/image-profiles";
 
 /**
  * Admins (logged in) see all services including inactive ones; everyone else sees the
@@ -38,6 +39,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const sanitizedProfiles =
+      service.imageProfiles != null
+        ? sanitizeImageProfilesInput(service.imageProfiles)
+        : [];
+
     const newService = await addService({
       name: service.name,
       description: service.description || "",
@@ -50,6 +56,7 @@ export async function POST(req: NextRequest) {
       proxmoxTemplate: service.proxmoxTemplate,
       proxmoxNode: service.proxmoxNode,
       active: service.active !== false,
+      ...(sanitizedProfiles.length > 0 ? { imageProfiles: sanitizedProfiles } : {}),
     });
 
     const [enriched] = await enrichServicesForPublic([newService]);

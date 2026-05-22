@@ -3,6 +3,7 @@ import { getService, updateService, deleteService } from "@/lib/db";
 import { publicServiceById } from "@/lib/service-pricing";
 import { normalizeRamMb } from "@/lib/service-ram";
 import { requireAdmin } from "@/lib/api-auth";
+import { sanitizeImageProfilesInput } from "@/lib/image-profiles";
 
 export async function GET(
   _req: NextRequest,
@@ -42,6 +43,9 @@ export async function PATCH(
     }
     if (patch.ram !== undefined) {
       patch.ram = normalizeRamMb(Number(patch.ram));
+    }
+    if ("imageProfiles" in patch && patch.imageProfiles !== undefined) {
+      patch.imageProfiles = sanitizeImageProfilesInput(patch.imageProfiles);
     }
 
     const updated = await updateService(id, patch as Parameters<typeof updateService>[1]);
