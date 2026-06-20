@@ -71,7 +71,7 @@ export async function POST(
 
     const hostedProfiles = await readActiveOsTemplateProfiles();
     const templates = effectiveTemplatesForOrder(order, service, hostedProfiles);
-    if (!resolveProvisionTarget(service, null, templates)) {
+    if (!(await resolveProvisionTarget(service, null, templates))) {
       return NextResponse.json(
         {
           error:

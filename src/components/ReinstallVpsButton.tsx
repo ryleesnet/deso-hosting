@@ -158,7 +158,7 @@ export function ReinstallVpsButton({
               >
                 {profiles.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.label} (VMID {p.templateVmid})
+                    {p.label}
                   </option>
                 ))}
               </select>

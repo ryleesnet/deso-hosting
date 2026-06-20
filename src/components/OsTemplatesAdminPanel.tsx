@@ -14,7 +14,7 @@ type Row = {
 };
 
 /** Admin CRUD for global Firestore catalogue `os_templates`. */
-export function OsTemplatesAdminPanel() {
+export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean }) {
   const [templates, setTemplates] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -132,8 +132,12 @@ export function OsTemplatesAdminPanel() {
   }
 
   return (
-    <section className="mt-14">
-      <h2 className="text-xl font-semibold">OS templates (global)</h2>
+    <section className={embedded ? "mt-6" : "mt-14 scroll-mt-28"} id={embedded ? undefined : "admin-host-os"}>
+      {!embedded ? (
+        <h2 className="text-xl font-semibold">OS templates (global)</h2>
+      ) : (
+        <h3 className="text-sm font-semibold">OS templates (global)</h3>
+      )}
       <p className="mt-2 max-w-3xl text-sm text-[var(--muted)] leading-relaxed">
         Name each Proxmox template guest (clone source VMID). Customers choose one at checkout and
         when reinstalling. Inactive templates stay off the storefront but remain editable here.

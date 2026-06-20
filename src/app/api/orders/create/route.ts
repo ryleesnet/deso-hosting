@@ -37,6 +37,7 @@ import {
 } from "@/lib/image-profiles";
 import { requireUser } from "@/lib/api-auth";
 import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
+import { getProxmoxHostConfig } from "@/lib/proxmox-host-config";
 
 /** Clone + resize + subscribe after HTTP response returns (dashboard can poll provisioning → active). */
 async function finalizeProvision(orderId: string) {
@@ -49,7 +50,7 @@ async function finalizeProvision(orderId: string) {
     return;
   }
   const hostedProfiles = await readActiveOsTemplateProfiles();
-  const target = resolveProvisionTarget(
+  const target = await resolveProvisionTarget(
     service,
     order.cloneTemplateVmid ?? null,
     effectiveTemplatesForOrder(order, service, hostedProfiles)
@@ -240,7 +241,11 @@ export async function POST(req: NextRequest) {
       cloneTemplatePrefer = clonePick.templateVmid;
     }
 
-    const target = resolveProvisionTarget(service, cloneTemplatePrefer ?? null, profilesList);
+    const target = await resolveProvisionTarget(
+      service,
+      cloneTemplatePrefer ?? null,
+      profilesList
+    );
 
     let desoHandle: string | undefined =
       typeof desoUsername === "string" && desoUsername.trim()
@@ -324,11 +329,16 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    const pendingNode =
+      service.proxmoxNode?.trim() ||
+      (await getProxmoxHostConfig()).effectiveDefaultCloneNode ||
+      "pending";
+
     const order = await addOrder({
       userId: publicKey,
       serviceId,
       vmid: 0,
-      node: service.proxmoxNode?.trim() || "pending",
+      node: pendingNode,
       status: "pending",
       ...credentials,
       ...(normalizedExtra.length > 0 ? { extraDisksGb: normalizedExtra } : {}),

@@ -16,6 +16,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyDesoJwt } from "@/lib/deso-jwt";
 import { PUBLIC_KEY_HEADER } from "@/lib/api-auth-headers";
+import {
+  allAdminPublicKeys,
+  envAdminPublicKeys,
+  publicKeyIsAdminAsync,
+} from "@/lib/admin-access";
 
 export { PUBLIC_KEY_HEADER };
 
@@ -30,17 +35,6 @@ export interface AuthFailure {
   response: NextResponse;
 }
 export type AuthResult = AuthSuccess | AuthFailure;
-
-function getAdminKeys(): string[] {
-  return (process.env.ADMIN_PUBLIC_KEYS || "")
-    .split(",")
-    .map((k) => k.trim())
-    .filter(Boolean);
-}
-
-function isAdminKey(publicKey: string): boolean {
-  return getAdminKeys().includes(publicKey);
-}
 
 function extractCredentials(req: NextRequest): {
   jwt: string;
@@ -80,7 +74,7 @@ export async function requireUser(
     return unauthorized(result.error, result.status);
   }
 
-  const admin = isAdminKey(result.mainPublicKey);
+  const admin = await publicKeyIsAdminAsync(result.mainPublicKey);
   if (opts?.requireAdmin && !admin) {
     return unauthorized("Admin access required", 403);
   }
@@ -94,10 +88,15 @@ export async function requireAdmin(req: NextRequest): Promise<AuthResult> {
 }
 
 /** Pure check (used in routes that already loaded the order). */
-export function publicKeyIsAdmin(publicKey: string): boolean {
-  return isAdminKey(publicKey);
+export async function publicKeyIsAdmin(publicKey: string): Promise<boolean> {
+  return publicKeyIsAdminAsync(publicKey);
 }
 
-export function adminKeyList(): string[] {
-  return getAdminKeys();
+export async function adminKeyList(): Promise<string[]> {
+  return allAdminPublicKeys();
+}
+
+/** Env-only admins (for diagnostics / UI labels). */
+export function adminKeysFromEnvironment(): string[] {
+  return envAdminPublicKeys();
 }

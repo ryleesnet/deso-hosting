@@ -22,6 +22,7 @@ import {
   startVM,
   stopVM,
 } from "@/lib/proxmox";
+import { getProxmoxHostConfig } from "@/lib/proxmox-host-config";
 import {
   cloudInitNetworkForIp,
   getPublicIpNameserverParam,
@@ -42,20 +43,24 @@ import {
  * otherwise `service.proxmoxTemplate` and env `PROXMOX_DEFAULT_TEMPLATE_VMID`
  * remain the fallback (`templateCatalog` is usually from `effectiveTemplatesForOrder`).
  */
-export function resolveProvisionTarget(
+export async function resolveProvisionTarget(
   service: VPSService,
   cloneTemplatePreferred: number | null | undefined,
   templateCatalog: ServiceImageProfile[]
-): {
+): Promise<{
   node: string;
   templateVmid: number;
-} | null {
+} | null> {
+  const hostCfg = await getProxmoxHostConfig();
   const envNode = process.env.PROXMOX_DEFAULT_NODE?.trim() || "";
   const envTemplateRaw =
     process.env.PROXMOX_DEFAULT_TEMPLATE_VMID?.trim() || "";
   const envTemplate = parseInt(envTemplateRaw, 10);
 
-  const node = service.proxmoxNode?.trim() || envNode;
+  const node =
+    service.proxmoxNode?.trim() ||
+    hostCfg.effectiveDefaultCloneNode ||
+    envNode;
 
   let templateVmid = 0;
   const profiles = templateCatalog;
@@ -437,7 +442,7 @@ export async function replaceOrderVmFromTemplate(
     }
   }
 
-  const target = resolveProvisionTarget(
+  const target = await resolveProvisionTarget(
     service,
     reinstallChoiceResolved?.templateVmid ?? null,
     profiles

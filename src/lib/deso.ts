@@ -154,9 +154,14 @@ export async function loginWithDeSo(): Promise<{
   }
 }
 
-export async function logoutDeSo() {
+export async function logoutDeSo(): Promise<boolean> {
   initDeSo();
-  await identity.logout();
+  try {
+    await identity.logout();
+  } catch (err) {
+    if (isIdentityFlowCancelled(err)) return false;
+    throw err;
+  }
   if (typeof window !== "undefined") {
     localStorage.removeItem(IDENTITY_USERS_KEY);
     localStorage.removeItem(IDENTITY_ACTIVE_PUBLIC_KEY);
@@ -165,6 +170,19 @@ export async function logoutDeSo() {
     const { clearJwtCache } = await import("@/lib/api-client");
     clearJwtCache();
   }
+  return true;
+}
+
+/** User closed or dismissed the Identity popup without completing the flow. */
+function isIdentityFlowCancelled(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { type?: string; name?: string; message?: string };
+  return (
+    e.type === "IDENTITY_WINDOW_CLOSED" ||
+    (e.name === "DeSoCoreError" &&
+      typeof e.message === "string" &&
+      e.message.includes("Identity window was closed"))
+  );
 }
 
 /**

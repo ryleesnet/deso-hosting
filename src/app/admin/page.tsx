@@ -7,6 +7,9 @@ import { ServiceForm } from "@/components/ServiceForm";
 import { DeleteVpsConfirmationDialog } from "@/components/DeleteVpsConfirmationDialog";
 import { OrderTemplatesModal } from "@/components/OrderTemplatesModal";
 import { OsTemplatesAdminPanel } from "@/components/OsTemplatesAdminPanel";
+import { ProxmoxHostConfigPanel } from "@/components/ProxmoxHostConfigPanel";
+import { AdminSectionNav } from "@/components/AdminSectionNav";
+import { AdminsAdminPanel } from "@/components/AdminsAdminPanel";
 import { formatDesoDisplay } from "@/lib/deso";
 import { formatUsdCents } from "@/lib/pricing";
 import { apiFetch } from "@/lib/api-client";
@@ -472,634 +475,13 @@ export default function AdminPage() {
     <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
       <h1 className="text-3xl font-bold">Admin Panel</h1>
       <p className="mt-2 text-[var(--muted)]">
-        Manage services and orders
+        Orders, catalogue, host settings, and access control
       </p>
 
-      {/* Import existing VM (production / manual onboarding) */}
-      <section className="mt-12 rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6">
-        <h2 className="text-xl font-semibold">Import existing VM (customer)</h2>
-        <p className="mt-2 text-sm text-[var(--muted)]">
-          Creates an <span className="font-medium text-[var(--foreground)]">active</span> order and
-          subscription linked to a VM that already exists in Proxmox — no clone and no cloud-init
-          changes. Required besides the fields below:{" "}
-          <span className="font-medium text-[var(--foreground)]">
-            service plan
-          </span>{" "}
-          (pricing / specs) and{" "}
-          <span className="font-medium text-[var(--foreground)]">Proxmox node</span> (same host
-          name you use in the orders table).
-        </p>
-        <form onSubmit={handleImportExistingVm} className="mt-6 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-[var(--foreground)]">
-              Customer DeSo public key <span className="text-red-400">*</span>
-            </label>
-            <textarea
-              value={importUserId}
-              onChange={(e) => setImportUserId(e.target.value)}
-              rows={3}
-              required
-              className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-xs"
-              placeholder="BC1YL…"
-            />
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-sm font-medium text-[var(--foreground)]">
-                Service plan <span className="text-red-400">*</span>
-              </label>
-              <select
-                value={importServiceId}
-                onChange={(e) => setImportServiceId(e.target.value)}
-                required
-                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
-              >
-                <option value="">Select…</option>
-                {services.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                    {!s.active ? " (inactive)" : ""} ({formatUsdCents(s.priceUsdCents ?? 0)}/mo)
-                  </option>
-                ))}
-              </select>
-              {services.length === 0 ? (
-                <p className="mt-1 text-xs text-amber-400">Add a service under VPS Services first.</p>
-              ) : null}
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-[var(--foreground)]">
-                Proxmox node <span className="text-red-400">*</span>
-              </label>
-              <input
-                value={importNode}
-                onChange={(e) => setImportNode(e.target.value)}
-                required
-                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
-                placeholder="pve01"
-              />
-            </div>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-sm font-medium text-[var(--foreground)]">
-                VMID <span className="text-red-400">*</span>
-              </label>
-              <input
-                type="number"
-                min={1}
-                value={importVmid}
-                onChange={(e) => setImportVmid(e.target.value)}
-                required
-                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
-                placeholder="5002"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-[var(--foreground)]">
-                Last payment date <span className="text-red-400">*</span>
-              </label>
-              <input
-                type="date"
-                value={importLastPayment}
-                onChange={(e) => setImportLastPayment(e.target.value)}
-                required
-                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
-              />
-              <p className="mt-1 text-xs text-[var(--muted)]">
-                Next renewal defaults to one calendar month after this if you leave the next field
-                empty.
-              </p>
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-[var(--foreground)]">
-              Next payment date <span className="text-[var(--muted)]">(optional)</span>
-            </label>
-            <input
-              type="date"
-              value={importNextPayment}
-              onChange={(e) => setImportNextPayment(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
-            />
-          </div>
-          <details className="rounded-lg border border-[var(--card-border)] bg-[var(--background)]/40 p-4">
-            <summary className="cursor-pointer text-sm font-medium text-[var(--foreground)]">
-              Optional: public IP, extra disks, login, SSH
-            </summary>
-            <div className="mt-4 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-[var(--muted)]">
-                  Public IPv4
-                </label>
-                <input
-                  value={importPublicIp}
-                  onChange={(e) => setImportPublicIp(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
-                  placeholder="If in pool, we try to mark the row assigned"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-[var(--muted)]">
-                  Extra data disks (GB, comma-separated — affects billed add-ons)
-                </label>
-                <input
-                  value={importExtraDisks}
-                  onChange={(e) => setImportExtraDisks(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
-                  placeholder="e.g. 50, 100"
-                />
-              </div>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-xs font-medium text-[var(--muted)]">
-                    VM login username (dashboard)
-                  </label>
-                  <input
-                    value={importLoginUser}
-                    onChange={(e) => setImportLoginUser(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-[var(--muted)]">
-                    VM login password (stored like other orders)
-                  </label>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={importLoginPass}
-                    onChange={(e) => setImportLoginPass(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-[var(--muted)]">
-                  SSH public key(s), one per line (optional; not pushed to Proxmox by this form)
-                </label>
-                <textarea
-                  value={importSshKeys}
-                  onChange={(e) => setImportSshKeys(e.target.value)}
-                  rows={3}
-                  className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-xs"
-                />
-              </div>
-            </div>
-          </details>
-          {importErr ? (
-            <p className="text-sm text-red-400" role="alert">
-              {importErr}
-            </p>
-          ) : null}
-          {importResult ? (
-            <div className="rounded-lg border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm text-green-300">
-              <p className="font-medium">Order created</p>
-              <p className="mt-1 font-mono text-xs break-all">{importResult.orderId}</p>
-              {importResult.hints.map((h) => (
-                <p key={h} className="mt-2 text-xs text-amber-200/95">
-                  {h}
-                </p>
-              ))}
-            </div>
-          ) : null}
-          <button
-            type="submit"
-            disabled={importBusy}
-            className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
-          >
-            {importBusy ? "Creating…" : "Create order + subscription"}
-          </button>
-        </form>
-      </section>
-
-      <OsTemplatesAdminPanel />
-
-      {/* Services */}
-      <section className="mt-12">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h2 className="text-xl font-semibold">VPS Services</h2>
-          </div>
-          <button
-            onClick={() => { setShowForm(true); setEditingId(null); }}
-            className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)]"
-          >
-            Add Service
-          </button>
-        </div>
-
-        {showForm && (
-          <ServiceForm
-            service={editingId ? services.find((s) => s.id === editingId) : undefined}
-            onClose={() => { setShowForm(false); setEditingId(null); loadData(); }}
-          />
-        )}
-
-        <div className="mt-6 space-y-4">
-          {services.map((s) => (
-            <div
-              key={s.id}
-              className="flex flex-col gap-4 rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <div>
-                <h3 className="font-semibold">{s.name}</h3>
-                <p className="text-sm text-[var(--muted)]">{s.description}</p>
-                <p className="mt-2 text-sm">
-                  {s.vcpu} vCPU · {s.ram / 1024} GB Memory · {s.storage} GB
-                </p>
-                <p className="mt-1 text-sm">
-                  <span className="text-[var(--accent)]">
-                    {formatUsdCents(s.priceUsdCents ?? 0)}/mo
-                  </span>
-                  <span className="text-[var(--muted)]">
-                    {" "}
-                    (~{formatDesoDisplay(s.pricePreviewNanos ?? s.priceNanos ?? 0)} DESO)
-                  </span>
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => { setEditingId(s.id); setShowForm(true); }}
-                  className="rounded-lg border border-[var(--card-border)] px-3 py-1.5 text-sm hover:bg-[var(--card)]"
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => handleDelete(s.id)}
-                  className="rounded-lg border border-red-500/50 px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/10"
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Public IP pool */}
-      <section className="mt-16">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <h2 className="text-xl font-semibold">Public IP Addresses</h2>
-          <button
-            type="button"
-            onClick={() => void reloadPublicIps()}
-            disabled={ipListRefreshing}
-            className="rounded-lg border border-[var(--card-border)] px-3 py-1.5 text-sm hover:bg-[var(--card)] disabled:opacity-50"
-          >
-            {ipListRefreshing ? "Refreshing…" : "Refresh pool"}
-          </button>
-        </div>
-        <p className="mt-2 text-sm text-[var(--muted)]">
-          Firestore <code className="rounded bg-[var(--card)] px-1">public_ips</code> —
-          edit status, order, user, and VM ID. Clearing optional fields removes them from the document.
-        </p>
-        <PublicIpPoolConfigPanel publicKey={user.publicKey} />
-        {publicIpError && (
-          <div className="mt-4 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm text-red-400">
-            {publicIpError}
-            <button
-              type="button"
-              onClick={() => setPublicIpError(null)}
-              className="ml-2 underline"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-[var(--muted)]">
-            Showing {filteredPublicIps.length} of {publicIps.length} addresses
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            {ipFiltersActive && (
-              <button
-                type="button"
-                onClick={clearIpFilters}
-                className="rounded-lg border border-[var(--card-border)] px-3 py-1.5 text-xs hover:bg-[var(--card)]"
-              >
-                Clear filters
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setIpFiltersOpen((v) => !v)}
-              aria-expanded={ipFiltersOpen}
-              aria-controls="public-ip-filter-fields"
-              className="inline-flex items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--card)]/30 px-3 py-1.5 text-xs font-medium hover:bg-[var(--card)]"
-            >
-              <span className="text-[10px] text-[var(--muted)]" aria-hidden>
-                {ipFiltersOpen ? "▼" : "▶"}
-              </span>
-              Filters
-              {ipFiltersActive && (
-                <span className="rounded-full bg-[var(--accent)]/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]">
-                  Active
-                </span>
-              )}
-            </button>
-          </div>
-        </div>
-        <div className="mt-2 max-h-[31rem] overflow-auto rounded-2xl border border-[var(--card-border)]">
-          <table className="w-full min-w-[720px] text-sm">
-            <thead className="sticky top-0 z-10 bg-[var(--card)] shadow-[0_1px_0_var(--card-border)]">
-              <tr>
-                <th className="px-3 py-3 text-left font-medium">Address</th>
-                <th className="px-3 py-3 text-left font-medium">Status</th>
-                <th className="px-3 py-3 text-left font-medium">Order ID</th>
-                <th className="px-3 py-3 text-left font-medium">User ID</th>
-                <th className="px-3 py-3 text-left font-medium">VMID</th>
-                <th className="px-3 py-3 text-left font-medium">Actions</th>
-              </tr>
-              {ipFiltersOpen && (
-                <tr
-                  id="public-ip-filter-fields"
-                  className="border-b border-[var(--card-border)]"
-                >
-                <th className="px-3 py-2 align-bottom font-normal">
-                  <label className="sr-only" htmlFor="ip-filter-address">
-                    Filter by IP address
-                  </label>
-                  <input
-                    id="ip-filter-address"
-                    type="text"
-                    value={ipFilterAddress}
-                    onChange={(e) => setIpFilterAddress(e.target.value)}
-                    placeholder="IP Address"
-                    className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
-                    aria-label="Filter by IP address substring"
-                  />
-                </th>
-                <th className="px-3 py-2 align-bottom font-normal">
-                  <label className="sr-only" htmlFor="ip-filter-status">
-                    Filter by status
-                  </label>
-                  <select
-                    id="ip-filter-status"
-                    value={ipFilterStatus}
-                    onChange={(e) => setIpFilterStatus(e.target.value)}
-                    className="w-full min-w-[8rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 text-xs"
-                    aria-label="Filter by status"
-                  >
-                    <option value="">All</option>
-                    <option value="available">available</option>
-                    <option value="assigned">assigned</option>
-                    <option value="reserved">reserved</option>
-                  </select>
-                </th>
-                <th className="px-3 py-2 align-bottom font-normal">
-                  <label className="sr-only" htmlFor="ip-filter-orderid">
-                    Filter by OrderID
-                  </label>
-                  <input
-                    id="ip-filter-orderid"
-                    type="text"
-                    value={ipFilterOrderId}
-                    onChange={(e) => setIpFilterOrderId(e.target.value)}
-                    placeholder="OrderID"
-                    className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
-                    aria-label="Filter by OrderID substring"
-                  />
-                </th>
-                <th className="px-3 py-2 align-bottom font-normal">
-                  <label className="sr-only" htmlFor="ip-filter-userid">
-                    Filter by PublicKey
-                  </label>
-                  <input
-                    id="ip-filter-userid"
-                    type="text"
-                    value={ipFilterUserId}
-                    onChange={(e) => setIpFilterUserId(e.target.value)}
-                    placeholder="PublicKey"
-                    className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
-                    aria-label="Filter by PublicKey substring"
-                  />
-                </th>
-                <th className="px-3 py-2 align-bottom font-normal">
-                  <label className="sr-only" htmlFor="ip-filter-vmid">
-                    Filter by VMID
-                  </label>
-                  <input
-                    id="ip-filter-vmid"
-                    type="text"
-                    inputMode="numeric"
-                    value={ipFilterVmid}
-                    onChange={(e) => setIpFilterVmid(e.target.value)}
-                    placeholder="VMID"
-                    className="w-full min-w-[3.5rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs tabular-nums placeholder:font-sans"
-                    aria-label="Filter by VMID substring"
-                  />
-                </th>
-                <th className="px-3 py-2 align-bottom font-normal" aria-hidden />
-                </tr>
-              )}
-            </thead>
-            <tbody>
-              {publicIps.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center text-[var(--muted)]">
-                    No IP rows loaded (empty pool or not seeded). Use{" "}
-                    <code className="rounded bg-[var(--card)] px-1">npm run db:seed-public-ips</code>{" "}
-                    to seed addresses.
-                  </td>
-                </tr>
-              ) : filteredPublicIps.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center text-[var(--muted)]">
-                    No addresses match the current filters.
-                  </td>
-                </tr>
-              ) : (
-                filteredPublicIps.map((ip) => {
-                  const isRowEdit = editingIp === ip.address;
-                  return (
-                    <tr
-                      key={ip.address}
-                      className="border-b border-[var(--card-border)] last:border-0"
-                    >
-                      <td className="px-3 py-2 font-mono text-xs">{ip.address}</td>
-                      <td className="px-3 py-2">
-                        {isRowEdit && ipDraft ? (
-                          <select
-                            value={ipDraft.status}
-                            onChange={(e) =>
-                              setIpDraft((d) =>
-                                d ? { ...d, status: e.target.value } : d
-                              )
-                            }
-                            className="w-full min-w-[8rem] rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 text-xs"
-                          >
-                            <option value="available">available</option>
-                            <option value="assigned">assigned</option>
-                            <option value="reserved">reserved</option>
-                          </select>
-                        ) : (
-                          <span
-                            className={
-                              ip.status === "available"
-                                ? "text-green-400"
-                                : ip.status === "assigned"
-                                  ? "text-[var(--accent)]"
-                                  : "text-yellow-400"
-                            }
-                          >
-                            {ip.status}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        {isRowEdit && ipDraft ? (
-                          <input
-                            type="text"
-                            value={ipDraft.orderId}
-                            onChange={(e) =>
-                              setIpDraft((d) =>
-                                d ? { ...d, orderId: e.target.value } : d
-                              )
-                            }
-                            placeholder="order id"
-                            className="w-full min-w-[6rem] rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 font-mono text-xs"
-                          />
-                        ) : (
-                          <span className="font-mono text-xs text-[var(--muted)]">
-                            {ip.orderId || "—"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        {isRowEdit && ipDraft ? (
-                          <input
-                            type="text"
-                            value={ipDraft.userId}
-                            onChange={(e) =>
-                              setIpDraft((d) =>
-                                d ? { ...d, userId: e.target.value } : d
-                              )
-                            }
-                            placeholder="DeSo public key"
-                            className="w-full min-w-[8rem] rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 font-mono text-xs"
-                          />
-                        ) : (
-                          <span className="font-mono text-xs text-[var(--muted)]">
-                            {ip.userId ? `${ip.userId.slice(0, 14)}…` : "—"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        {isRowEdit && ipDraft ? (
-                          <input
-                            type="number"
-                            min={0}
-                            value={ipDraft.vmid}
-                            onChange={(e) =>
-                              setIpDraft((d) =>
-                                d ? { ...d, vmid: e.target.value } : d
-                              )
-                            }
-                            placeholder="vmid"
-                            className="w-20 rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 text-xs"
-                          />
-                        ) : (
-                          <span className="tabular-nums">
-                            {ip.vmid != null && ip.vmid > 0 ? ip.vmid : "—"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        {isRowEdit ? (
-                          <div className="flex flex-wrap gap-1">
-                            <button
-                              type="button"
-                              disabled={ipSaving === ip.address}
-                              onClick={async () => {
-                                if (!user || !ipDraft) return;
-                                setPublicIpError(null);
-                                setIpSaving(ip.address);
-                                try {
-                                  const res = await apiFetch(
-                                    "/api/admin/public-ips",
-                                    {
-                                      method: "PATCH",
-                                      headers: {
-                                        "Content-Type": "application/json",
-                                      },
-                                      body: JSON.stringify({
-                                        address: ip.address,
-                                        status: ipDraft.status,
-                                        orderId: ipDraft.orderId.trim(),
-                                        userId: ipDraft.userId.trim(),
-                                        vmid:
-                                          ipDraft.vmid.trim() === ""
-                                            ? null
-                                            : ipDraft.vmid,
-                                      }),
-                                    }
-                                  );
-                                  const data = await res.json().catch(() => ({}));
-                                  if (!res.ok) {
-                                    setPublicIpError(
-                                      typeof data.error === "string"
-                                        ? data.error
-                                        : "Update failed"
-                                    );
-                                    return;
-                                  }
-                                  setEditingIp(null);
-                                  setIpDraft(null);
-                                  loadData();
-                                } finally {
-                                  setIpSaving(null);
-                                }
-                              }}
-                              className="rounded bg-[var(--accent)] px-2 py-1 text-xs font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
-                            >
-                              {ipSaving === ip.address ? "Saving…" : "Save"}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={ipSaving === ip.address}
-                              onClick={() => {
-                                setEditingIp(null);
-                                setIpDraft(null);
-                                setPublicIpError(null);
-                              }}
-                              className="rounded border border-[var(--card-border)] px-2 py-1 text-xs hover:bg-[var(--card)]"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingIp(ip.address);
-                              setIpDraft({
-                                status: ip.status || "available",
-                                orderId: ip.orderId ?? "",
-                                userId: ip.userId ?? "",
-                                vmid:
-                                  ip.vmid != null && ip.vmid > 0
-                                    ? String(ip.vmid)
-                                    : "",
-                              });
-                              setPublicIpError(null);
-                            }}
-                            className="rounded border border-[var(--card-border)] px-2 py-1 text-xs hover:bg-[var(--card)]"
-                          >
-                            Edit
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <AdminSectionNav />
 
       {/* Orders */}
-      <section className="mt-16">
+      <section id="admin-orders" className="scroll-mt-28 mt-10">
         <h2 className="text-xl font-semibold">Orders</h2>
         <p className="mt-2 max-w-4xl text-xs text-[var(--muted)] leading-relaxed">
           Override per VPS with <strong className="font-medium text-[var(--foreground)]">VPS OS templates</strong>.
@@ -1545,6 +927,687 @@ export default function AdminPage() {
           </table>
         </div>
       </section>
+
+      {/* Import existing VM (production / manual onboarding) */}
+      <section id="admin-import" className="scroll-mt-28 mt-16 rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6">
+        <h2 className="text-xl font-semibold">Import existing VM (customer)</h2>
+        <p className="mt-2 text-sm text-[var(--muted)]">
+          Creates an <span className="font-medium text-[var(--foreground)]">active</span> order and
+          subscription linked to a VM that already exists in Proxmox — no clone and no cloud-init
+          changes. Required besides the fields below:{" "}
+          <span className="font-medium text-[var(--foreground)]">
+            service plan
+          </span>{" "}
+          (pricing / specs) and{" "}
+          <span className="font-medium text-[var(--foreground)]">Proxmox node</span> (same host
+          name you use in the orders table).
+        </p>
+        <form onSubmit={handleImportExistingVm} className="mt-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-[var(--foreground)]">
+              Customer DeSo public key <span className="text-red-400">*</span>
+            </label>
+            <textarea
+              value={importUserId}
+              onChange={(e) => setImportUserId(e.target.value)}
+              rows={3}
+              required
+              className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-xs"
+              placeholder="BC1YL…"
+            />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-[var(--foreground)]">
+                Service plan <span className="text-red-400">*</span>
+              </label>
+              <select
+                value={importServiceId}
+                onChange={(e) => setImportServiceId(e.target.value)}
+                required
+                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+              >
+                <option value="">Select…</option>
+                {services.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                    {!s.active ? " (inactive)" : ""} ({formatUsdCents(s.priceUsdCents ?? 0)}/mo)
+                  </option>
+                ))}
+              </select>
+              {services.length === 0 ? (
+                <p className="mt-1 text-xs text-amber-400">Add a service under VPS Services first.</p>
+              ) : null}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[var(--foreground)]">
+                Proxmox node <span className="text-red-400">*</span>
+              </label>
+              <input
+                value={importNode}
+                onChange={(e) => setImportNode(e.target.value)}
+                required
+                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
+                placeholder="pve01"
+              />
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-[var(--foreground)]">
+                VMID <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={importVmid}
+                onChange={(e) => setImportVmid(e.target.value)}
+                required
+                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
+                placeholder="5002"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[var(--foreground)]">
+                Last payment date <span className="text-red-400">*</span>
+              </label>
+              <input
+                type="date"
+                value={importLastPayment}
+                onChange={(e) => setImportLastPayment(e.target.value)}
+                required
+                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+              />
+              <p className="mt-1 text-xs text-[var(--muted)]">
+                Next renewal defaults to one calendar month after this if you leave the next field
+                empty.
+              </p>
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-[var(--foreground)]">
+              Next payment date <span className="text-[var(--muted)]">(optional)</span>
+            </label>
+            <input
+              type="date"
+              value={importNextPayment}
+              onChange={(e) => setImportNextPayment(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+            />
+          </div>
+          <details className="rounded-lg border border-[var(--card-border)] bg-[var(--background)]/40 p-4">
+            <summary className="cursor-pointer text-sm font-medium text-[var(--foreground)]">
+              Optional: public IP, extra disks, login, SSH
+            </summary>
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-[var(--muted)]">
+                  Public IPv4
+                </label>
+                <input
+                  value={importPublicIp}
+                  onChange={(e) => setImportPublicIp(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
+                  placeholder="If in pool, we try to mark the row assigned"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-[var(--muted)]">
+                  Extra data disks (GB, comma-separated — affects billed add-ons)
+                </label>
+                <input
+                  value={importExtraDisks}
+                  onChange={(e) => setImportExtraDisks(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
+                  placeholder="e.g. 50, 100"
+                />
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-medium text-[var(--muted)]">
+                    VM login username (dashboard)
+                  </label>
+                  <input
+                    value={importLoginUser}
+                    onChange={(e) => setImportLoginUser(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[var(--muted)]">
+                    VM login password (stored like other orders)
+                  </label>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={importLoginPass}
+                    onChange={(e) => setImportLoginPass(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-[var(--muted)]">
+                  SSH public key(s), one per line (optional; not pushed to Proxmox by this form)
+                </label>
+                <textarea
+                  value={importSshKeys}
+                  onChange={(e) => setImportSshKeys(e.target.value)}
+                  rows={3}
+                  className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-xs"
+                />
+              </div>
+            </div>
+          </details>
+          {importErr ? (
+            <p className="text-sm text-red-400" role="alert">
+              {importErr}
+            </p>
+          ) : null}
+          {importResult ? (
+            <div className="rounded-lg border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm text-green-300">
+              <p className="font-medium">Order created</p>
+              <p className="mt-1 font-mono text-xs break-all">{importResult.orderId}</p>
+              {importResult.hints.map((h) => (
+                <p key={h} className="mt-2 text-xs text-amber-200/95">
+                  {h}
+                </p>
+              ))}
+            </div>
+          ) : null}
+          <button
+            type="submit"
+            disabled={importBusy}
+            className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
+          >
+            {importBusy ? "Creating…" : "Create order + subscription"}
+          </button>
+        </form>
+      </section>
+
+      {/* Services */}
+      <section id="admin-services" className="scroll-mt-28 mt-16">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold">VPS Services</h2>
+          </div>
+          <button
+            onClick={() => { setShowForm(true); setEditingId(null); }}
+            className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)]"
+          >
+            Add Service
+          </button>
+        </div>
+
+        {showForm && (
+          <ServiceForm
+            service={editingId ? services.find((s) => s.id === editingId) : undefined}
+            onClose={() => { setShowForm(false); setEditingId(null); loadData(); }}
+          />
+        )}
+
+        <div className="mt-6 space-y-4">
+          {services.map((s) => (
+            <div
+              key={s.id}
+              className="flex flex-col gap-4 rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div>
+                <h3 className="font-semibold">{s.name}</h3>
+                <p className="text-sm text-[var(--muted)]">{s.description}</p>
+                <p className="mt-2 text-sm">
+                  {s.vcpu} vCPU · {s.ram / 1024} GB Memory · {s.storage} GB
+                </p>
+                <p className="mt-1 text-sm">
+                  <span className="text-[var(--accent)]">
+                    {formatUsdCents(s.priceUsdCents ?? 0)}/mo
+                  </span>
+                  <span className="text-[var(--muted)]">
+                    {" "}
+                    (~{formatDesoDisplay(s.pricePreviewNanos ?? s.priceNanos ?? 0)} DESO)
+                  </span>
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { setEditingId(s.id); setShowForm(true); }}
+                  className="rounded-lg border border-[var(--card-border)] px-3 py-1.5 text-sm hover:bg-[var(--card)]"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => handleDelete(s.id)}
+                  className="rounded-lg border border-red-500/50 px-3 py-1.5 text-sm text-red-400 hover:bg-red-500/10"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section id="admin-host" className="scroll-mt-28 mt-16">
+        <h2 className="text-xl font-semibold">Host configuration</h2>
+        <p className="mt-2 max-w-3xl text-sm text-[var(--muted)] leading-relaxed">
+          Global OS templates and Proxmox defaults used when provisioning new VPS guests.
+        </p>
+        <OsTemplatesAdminPanel embedded />
+        <ProxmoxHostConfigPanel embedded />
+      </section>
+
+      {/* Public IP pool */}
+      <section id="admin-ips" className="scroll-mt-28 mt-16">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <h2 className="text-xl font-semibold">Public IP Addresses</h2>
+          <button
+            type="button"
+            onClick={() => void reloadPublicIps()}
+            disabled={ipListRefreshing}
+            className="rounded-lg border border-[var(--card-border)] px-3 py-1.5 text-sm hover:bg-[var(--card)] disabled:opacity-50"
+          >
+            {ipListRefreshing ? "Refreshing…" : "Refresh pool"}
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-[var(--muted)]">
+          Firestore <code className="rounded bg-[var(--card)] px-1">public_ips</code> —
+          edit status, order, user, and VM ID. Clearing optional fields removes them from the document.
+        </p>
+        <PublicIpPoolConfigPanel publicKey={user.publicKey} />
+        {publicIpError && (
+          <div className="mt-4 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm text-red-400">
+            {publicIpError}
+            <button
+              type="button"
+              onClick={() => setPublicIpError(null)}
+              className="ml-2 underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-[var(--muted)]">
+            Showing {filteredPublicIps.length} of {publicIps.length} addresses
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {ipFiltersActive && (
+              <button
+                type="button"
+                onClick={clearIpFilters}
+                className="rounded-lg border border-[var(--card-border)] px-3 py-1.5 text-xs hover:bg-[var(--card)]"
+              >
+                Clear filters
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIpFiltersOpen((v) => !v)}
+              aria-expanded={ipFiltersOpen}
+              aria-controls="public-ip-filter-fields"
+              className="inline-flex items-center gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--card)]/30 px-3 py-1.5 text-xs font-medium hover:bg-[var(--card)]"
+            >
+              <span className="text-[10px] text-[var(--muted)]" aria-hidden>
+                {ipFiltersOpen ? "▼" : "▶"}
+              </span>
+              Filters
+              {ipFiltersActive && (
+                <span className="rounded-full bg-[var(--accent)]/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]">
+                  Active
+                </span>
+              )}
+            </button>
+          </div>
+        </div>
+        <div className="mt-2 max-h-[31rem] overflow-auto rounded-2xl border border-[var(--card-border)]">
+          <table className="w-full min-w-[720px] text-sm">
+            <thead className="sticky top-0 z-10 bg-[var(--card)] shadow-[0_1px_0_var(--card-border)]">
+              <tr>
+                <th className="px-3 py-3 text-left font-medium">Address</th>
+                <th className="px-3 py-3 text-left font-medium">Status</th>
+                <th className="px-3 py-3 text-left font-medium">Order ID</th>
+                <th className="px-3 py-3 text-left font-medium">User ID</th>
+                <th className="px-3 py-3 text-left font-medium">VMID</th>
+                <th className="px-3 py-3 text-left font-medium">Actions</th>
+              </tr>
+              {ipFiltersOpen && (
+                <tr
+                  id="public-ip-filter-fields"
+                  className="border-b border-[var(--card-border)]"
+                >
+                <th className="px-3 py-2 align-bottom font-normal">
+                  <label className="sr-only" htmlFor="ip-filter-address">
+                    Filter by IP address
+                  </label>
+                  <input
+                    id="ip-filter-address"
+                    type="text"
+                    value={ipFilterAddress}
+                    onChange={(e) => setIpFilterAddress(e.target.value)}
+                    placeholder="IP Address"
+                    className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
+                    aria-label="Filter by IP address substring"
+                  />
+                </th>
+                <th className="px-3 py-2 align-bottom font-normal">
+                  <label className="sr-only" htmlFor="ip-filter-status">
+                    Filter by status
+                  </label>
+                  <select
+                    id="ip-filter-status"
+                    value={ipFilterStatus}
+                    onChange={(e) => setIpFilterStatus(e.target.value)}
+                    className="w-full min-w-[8rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 text-xs"
+                    aria-label="Filter by status"
+                  >
+                    <option value="">All</option>
+                    <option value="available">available</option>
+                    <option value="assigned">assigned</option>
+                    <option value="reserved">reserved</option>
+                  </select>
+                </th>
+                <th className="px-3 py-2 align-bottom font-normal">
+                  <label className="sr-only" htmlFor="ip-filter-orderid">
+                    Filter by OrderID
+                  </label>
+                  <input
+                    id="ip-filter-orderid"
+                    type="text"
+                    value={ipFilterOrderId}
+                    onChange={(e) => setIpFilterOrderId(e.target.value)}
+                    placeholder="OrderID"
+                    className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
+                    aria-label="Filter by OrderID substring"
+                  />
+                </th>
+                <th className="px-3 py-2 align-bottom font-normal">
+                  <label className="sr-only" htmlFor="ip-filter-userid">
+                    Filter by PublicKey
+                  </label>
+                  <input
+                    id="ip-filter-userid"
+                    type="text"
+                    value={ipFilterUserId}
+                    onChange={(e) => setIpFilterUserId(e.target.value)}
+                    placeholder="PublicKey"
+                    className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
+                    aria-label="Filter by PublicKey substring"
+                  />
+                </th>
+                <th className="px-3 py-2 align-bottom font-normal">
+                  <label className="sr-only" htmlFor="ip-filter-vmid">
+                    Filter by VMID
+                  </label>
+                  <input
+                    id="ip-filter-vmid"
+                    type="text"
+                    inputMode="numeric"
+                    value={ipFilterVmid}
+                    onChange={(e) => setIpFilterVmid(e.target.value)}
+                    placeholder="VMID"
+                    className="w-full min-w-[3.5rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs tabular-nums placeholder:font-sans"
+                    aria-label="Filter by VMID substring"
+                  />
+                </th>
+                <th className="px-3 py-2 align-bottom font-normal" aria-hidden />
+                </tr>
+              )}
+            </thead>
+            <tbody>
+              {publicIps.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-[var(--muted)]">
+                    No IP rows loaded (empty pool or not seeded). Use{" "}
+                    <code className="rounded bg-[var(--card)] px-1">npm run db:seed-public-ips</code>{" "}
+                    to seed addresses.
+                  </td>
+                </tr>
+              ) : filteredPublicIps.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-[var(--muted)]">
+                    No addresses match the current filters.
+                  </td>
+                </tr>
+              ) : (
+                filteredPublicIps.map((ip) => {
+                  const isRowEdit = editingIp === ip.address;
+                  return (
+                    <tr
+                      key={ip.address}
+                      className="border-b border-[var(--card-border)] last:border-0"
+                    >
+                      <td className="px-3 py-2 font-mono text-xs">
+                        <button
+                          type="button"
+                          onClick={(e) =>
+                            void copyOrderAdminField(ip.address, "IP address", e)
+                          }
+                          className="max-w-full cursor-pointer truncate text-left underline-offset-2 hover:underline"
+                          title="Copy IP address"
+                        >
+                          {ip.address}
+                        </button>
+                      </td>
+                      <td className="px-3 py-2">
+                        {isRowEdit && ipDraft ? (
+                          <select
+                            value={ipDraft.status}
+                            onChange={(e) =>
+                              setIpDraft((d) =>
+                                d ? { ...d, status: e.target.value } : d
+                              )
+                            }
+                            className="w-full min-w-[8rem] rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 text-xs"
+                          >
+                            <option value="available">available</option>
+                            <option value="assigned">assigned</option>
+                            <option value="reserved">reserved</option>
+                          </select>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) =>
+                              void copyOrderAdminField(ip.status, "status", e)
+                            }
+                            className={`cursor-pointer underline-offset-2 hover:underline ${
+                              ip.status === "available"
+                                ? "text-green-400"
+                                : ip.status === "assigned"
+                                  ? "text-[var(--accent)]"
+                                  : "text-yellow-400"
+                            }`}
+                            title="Copy status"
+                          >
+                            {ip.status}
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        {isRowEdit && ipDraft ? (
+                          <input
+                            type="text"
+                            value={ipDraft.orderId}
+                            onChange={(e) =>
+                              setIpDraft((d) =>
+                                d ? { ...d, orderId: e.target.value } : d
+                              )
+                            }
+                            placeholder="order id"
+                            className="w-full min-w-[6rem] rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 font-mono text-xs"
+                          />
+                        ) : ip.orderId?.trim() ? (
+                          <button
+                            type="button"
+                            onClick={(e) =>
+                              void copyOrderAdminField(ip.orderId!, "order ID", e)
+                            }
+                            className="max-w-full cursor-pointer truncate text-left font-mono text-xs text-[var(--muted)] underline-offset-2 hover:underline"
+                            title="Copy full order ID"
+                          >
+                            {ip.orderId.length > 12
+                              ? `${ip.orderId.slice(0, 12)}…`
+                              : ip.orderId}
+                          </button>
+                        ) : (
+                          <span className="font-mono text-xs text-[var(--muted)]">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        {isRowEdit && ipDraft ? (
+                          <input
+                            type="text"
+                            value={ipDraft.userId}
+                            onChange={(e) =>
+                              setIpDraft((d) =>
+                                d ? { ...d, userId: e.target.value } : d
+                              )
+                            }
+                            placeholder="DeSo public key"
+                            className="w-full min-w-[8rem] rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 font-mono text-xs"
+                          />
+                        ) : ip.userId?.trim() ? (
+                          <button
+                            type="button"
+                            onClick={(e) =>
+                              void copyOrderAdminField(
+                                ip.userId!,
+                                "user public key",
+                                e
+                              )
+                            }
+                            className="max-w-full cursor-pointer truncate text-left font-mono text-xs text-[var(--muted)] underline-offset-2 hover:underline"
+                            title="Copy full user public key"
+                          >
+                            {ip.userId.slice(0, 14)}…
+                          </button>
+                        ) : (
+                          <span className="font-mono text-xs text-[var(--muted)]">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        {isRowEdit && ipDraft ? (
+                          <input
+                            type="number"
+                            min={0}
+                            value={ipDraft.vmid}
+                            onChange={(e) =>
+                              setIpDraft((d) =>
+                                d ? { ...d, vmid: e.target.value } : d
+                              )
+                            }
+                            placeholder="vmid"
+                            className="w-20 rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 text-xs"
+                          />
+                        ) : ip.vmid != null && ip.vmid > 0 ? (
+                          <button
+                            type="button"
+                            onClick={(e) =>
+                              void copyOrderAdminField(String(ip.vmid), "VMID", e)
+                            }
+                            className="cursor-pointer tabular-nums underline-offset-2 hover:underline"
+                            title="Copy VMID"
+                          >
+                            {ip.vmid}
+                          </button>
+                        ) : (
+                          <span className="tabular-nums text-[var(--muted)]">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        {isRowEdit ? (
+                          <div className="flex flex-wrap gap-1">
+                            <button
+                              type="button"
+                              disabled={ipSaving === ip.address}
+                              onClick={async () => {
+                                if (!user || !ipDraft) return;
+                                setPublicIpError(null);
+                                setIpSaving(ip.address);
+                                try {
+                                  const res = await apiFetch(
+                                    "/api/admin/public-ips",
+                                    {
+                                      method: "PATCH",
+                                      headers: {
+                                        "Content-Type": "application/json",
+                                      },
+                                      body: JSON.stringify({
+                                        address: ip.address,
+                                        status: ipDraft.status,
+                                        orderId: ipDraft.orderId.trim(),
+                                        userId: ipDraft.userId.trim(),
+                                        vmid:
+                                          ipDraft.vmid.trim() === ""
+                                            ? null
+                                            : ipDraft.vmid,
+                                      }),
+                                    }
+                                  );
+                                  const data = await res.json().catch(() => ({}));
+                                  if (!res.ok) {
+                                    setPublicIpError(
+                                      typeof data.error === "string"
+                                        ? data.error
+                                        : "Update failed"
+                                    );
+                                    return;
+                                  }
+                                  setEditingIp(null);
+                                  setIpDraft(null);
+                                  loadData();
+                                } finally {
+                                  setIpSaving(null);
+                                }
+                              }}
+                              className="rounded bg-[var(--accent)] px-2 py-1 text-xs font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
+                            >
+                              {ipSaving === ip.address ? "Saving…" : "Save"}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={ipSaving === ip.address}
+                              onClick={() => {
+                                setEditingIp(null);
+                                setIpDraft(null);
+                                setPublicIpError(null);
+                              }}
+                              className="rounded border border-[var(--card-border)] px-2 py-1 text-xs hover:bg-[var(--card)]"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingIp(ip.address);
+                              setIpDraft({
+                                status: ip.status || "available",
+                                orderId: ip.orderId ?? "",
+                                userId: ip.userId ?? "",
+                                vmid:
+                                  ip.vmid != null && ip.vmid > 0
+                                    ? String(ip.vmid)
+                                    : "",
+                              });
+                              setPublicIpError(null);
+                            }}
+                            className="rounded border border-[var(--card-border)] px-2 py-1 text-xs hover:bg-[var(--card)]"
+                          >
+                            Edit
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <AdminsAdminPanel />
 
       {user ? (
         <DeleteVpsConfirmationDialog

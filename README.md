@@ -36,8 +36,7 @@ cp .env.example .env
 **DeSo:**
 - `DESO_PAYMENT_PUBLIC_KEY` – Your DeSo public key for receiving payments
 - `NEXT_PUBLIC_DESO_PAYMENT_PUBLIC_KEY` – Same (for client-side payment flow)
-- `ADMIN_PUBLIC_KEYS` – Comma-separated DeSo public keys for admin access
-- `NEXT_PUBLIC_ADMIN_PUBLIC_KEYS` – Same (for client-side admin check)
+- `ADMIN_PUBLIC_KEYS` – Comma-separated DeSo public keys for bootstrap admin access (always honored; cannot be removed in the admin UI). Additional admins can be added under **Admin → Administrators**.
 - `DESO_USD_PRICE` – Optional. Fixed **USD per 1 DESO** for conversion (e.g. `12.50`). If unset, the app reads **`USDCentsPerDeSoExchangeRate`** from the DeSo node’s **`GET /api/v0/get-exchange-rate`** (same host as `NEXT_PUBLIC_DESO_NODE_URI` / `DESO_NODE_URI`, default `https://node.deso.org`).
 - `DESO_NODE_URI` – Optional. Backend base URL for the exchange-rate request (no trailing slash). Defaults to `NEXT_PUBLIC_DESO_NODE_URI` or `https://node.deso.org`.
 - `NEXT_PUBLIC_MAX_MONTHLY_PAYMENT_NANOS` / `NEXT_PUBLIC_IDENTITY_GLOBAL_DESO_LIMIT_NANOS` – Raise if your priciest plan (in DeSo, after USD conversion) exceeds the default Identity spending cap.

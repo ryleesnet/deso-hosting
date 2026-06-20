@@ -7,6 +7,7 @@ import * as https from "node:https";
 import axios, { type AxiosInstance } from "axios";
 import { normalizeExtraDisksGb } from "@/lib/extra-disks";
 import type { CloudInitPublicNetwork } from "@/lib/public-ip-pool";
+import { resolveProxmoxDiskStoragePool, getProxmoxHostConfig } from "@/lib/proxmox-host-config";
 
 const PROXMOX_HOST = process.env.PROXMOX_HOST || "localhost";
 const PROXMOX_PORT = process.env.PROXMOX_PORT || "8006";
@@ -425,11 +426,10 @@ function parseStoragePoolFromDiskValue(frag: string): string | null {
   return pool;
 }
 
-function extractDiskStoragePool(
+async function resolveDiskStoragePoolForGuest(
   cfg: Record<string, unknown>,
   primaryDiskKey: string | null
-): string {
-  const envPool = process.env.PROXMOX_DISK_STORAGE?.trim();
+): Promise<string> {
   if (primaryDiskKey) {
     const raw = cfg[primaryDiskKey];
     if (typeof raw === "string") {
@@ -437,7 +437,7 @@ function extractDiskStoragePool(
       if (p) return p;
     }
   }
-  return envPool || "local-lvm";
+  return resolveProxmoxDiskStoragePool();
 }
 
 function maxSuffixIndexForBus(
@@ -503,7 +503,7 @@ export async function attachExtraDataDisksToVM(
   sizesGb: number[]
 ): Promise<void> {
   if (sizesGb.length === 0) return;
-  const pool = extractDiskStoragePool(cfg, primaryDiskKey);
+  const pool = await resolveDiskStoragePoolForGuest(cfg, primaryDiskKey);
   const attachBus = pickExtraDiskAttachBus(primaryDiskKey);
   let slot = maxSuffixIndexForBus(cfg, attachBus) + 1;
 
@@ -1167,10 +1167,8 @@ export async function pickBestProvisioningNode(
   templateNode: string,
   specs: { ramMb: number; vcpu: number }
 ): Promise<string> {
-  const disable =
-    process.env.PROXMOX_AUTO_PLACE_VMS === "0" ||
-    process.env.PROXMOX_AUTO_PLACE_VMS === "false";
-  if (disable) {
+  const hostCfg = await getProxmoxHostConfig();
+  if (!hostCfg.effectiveAutoPlaceNewVms) {
     return templateNode;
   }
   try {
@@ -1205,13 +1203,19 @@ export async function cloneVM(
   newVmid: number,
   name?: string,
   fullClone = true,
-  options?: { target?: string }
+  options?: { target?: string; storage?: string }
 ): Promise<number> {
   const client = await getProxmoxClient();
   const params = new URLSearchParams();
   params.set("newid", String(newVmid));
   params.set("full", fullClone ? "1" : "0");
   if (name) params.set("name", name);
+  if (fullClone) {
+    params.set(
+      "storage",
+      options?.storage?.trim() || (await resolveProxmoxDiskStoragePool())
+    );
+  }
   const target = options?.target?.trim();
   if (target && target !== node) {
     params.set("target", target);
