@@ -956,6 +956,160 @@ export async function resetVM(node: string, vmid: number): Promise<void> {
   await client.post(`/nodes/${node}/qemu/${vmid}/status/reset`);
 }
 
+function restoreTaskPollTimeoutMs(): number | null {
+  return parseTimeoutEnv(
+    process.env.PROXMOX_RESTORE_TASK_TIMEOUT_MS,
+    7_200_000 // 2h — large backup restores can run a long time
+  );
+}
+
+function formatBackupSizeBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "unknown size";
+  const units = ["B", "KB", "MB", "GB", "TB"] as const;
+  let n = bytes;
+  let u = 0;
+  while (n >= 1024 && u < units.length - 1) {
+    n /= 1024;
+    u += 1;
+  }
+  const digits = u >= 2 ? 1 : 0;
+  return `${n.toFixed(digits)} ${units[u]}`;
+}
+
+function formatBackupLabel(
+  volid: string,
+  ctimeSec: number,
+  sizeBytes: number
+): string {
+  const base =
+    ctimeSec > 0
+      ? new Date(ctimeSec * 1000).toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        })
+      : volid.split("/").pop() ?? volid;
+  const size = formatBackupSizeBytes(sizeBytes);
+  return `${base} · ${size}`;
+}
+
+export type VmBackupListItem = {
+  volid: string;
+  label: string;
+  sizeBytes: number;
+  createdAt: string;
+  format: string;
+};
+
+/** List vzdump archives for a guest on a Proxmox storage pool. */
+export async function listVmBackups(
+  node: string,
+  vmid: number,
+  storagePool: string
+): Promise<VmBackupListItem[]> {
+  const client = await getProxmoxClient();
+  const { data } = await client.get(
+    `/nodes/${node}/storage/${encodeURIComponent(storagePool)}/content`,
+    { params: { content: "backup", vmid } }
+  );
+  const rows = Array.isArray(data.data) ? data.data : [];
+  const items: VmBackupListItem[] = [];
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const rec = row as Record<string, unknown>;
+    const volid = rec.volid;
+    if (typeof volid !== "string" || !volid.trim()) continue;
+
+    const rowVmid =
+      typeof rec.vmid === "number"
+        ? rec.vmid
+        : typeof rec.vmid === "string"
+          ? parseInt(rec.vmid, 10)
+          : NaN;
+    if (Number.isFinite(rowVmid) && rowVmid !== vmid) continue;
+
+    const vzMatch = volid.match(/vzdump-qemu-(\d+)-/);
+    if (vzMatch && parseInt(vzMatch[1]!, 10) !== vmid) continue;
+
+    const ctime =
+      typeof rec.ctime === "number"
+        ? rec.ctime
+        : typeof rec.ctime === "string"
+          ? parseInt(rec.ctime, 10)
+          : 0;
+    const size =
+      typeof rec.size === "number"
+        ? rec.size
+        : typeof rec.size === "string"
+          ? parseInt(rec.size, 10)
+          : 0;
+    const format =
+      typeof rec.format === "string" && rec.format.trim()
+        ? rec.format.trim()
+        : "unknown";
+
+    items.push({
+      volid,
+      label: formatBackupLabel(volid, ctime, size),
+      sizeBytes: Number.isFinite(size) ? size : 0,
+      createdAt: ctime > 0 ? new Date(ctime * 1000).toISOString() : "",
+      format,
+    });
+  }
+
+  items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return items;
+}
+
+/**
+ * Stop the guest, restore from a vzdump archive over the existing VMID, then start it again.
+ */
+export async function restoreVmFromBackup(
+  node: string,
+  vmid: number,
+  archiveVolid: string
+): Promise<void> {
+  const client = await getProxmoxClient();
+
+  try {
+    const { data } = await client.get(
+      `/nodes/${node}/qemu/${vmid}/status/current`
+    );
+    const status = data.data?.status as string | undefined;
+    if (status === "running" || status === "paused") {
+      await stopVM(node, vmid, { overruleShutdown: true });
+      await waitUntilVmStopped(client, node, vmid);
+    }
+  } catch (err: unknown) {
+    const status = (err as { response?: { status?: number } }).response?.status;
+    if (status !== 404) throw err;
+  }
+
+  const params = new URLSearchParams();
+  params.set("vmid", String(vmid));
+  params.set("archive", archiveVolid);
+  params.set("force", "1");
+  params.set("start", "0");
+
+  const res = await client.post(
+    `/nodes/${node}/qemu`,
+    params.toString(),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
+  const upid = res.data?.data;
+  if (typeof upid === "string" && upid.startsWith("UPID:")) {
+    await waitForTask(
+      client,
+      upid,
+      node,
+      restoreTaskPollTimeoutMs(),
+      "restore"
+    );
+  }
+
+  await startVM(node, vmid);
+}
+
 export async function destroyVM(node: string, vmid: number): Promise<void> {
   const client = await getProxmoxClient();
   await client.delete(`/nodes/${node}/qemu/${vmid}`);

@@ -40,6 +40,10 @@ export async function PATCH(req: NextRequest) {
       patch.defaultDiskStorage =
         v == null || v === "" ? null : String(v);
     }
+    if (Object.prototype.hasOwnProperty.call(body, "backupStorage")) {
+      const v = body.backupStorage;
+      patch.backupStorage = v == null || v === "" ? null : String(v);
+    }
 
     const updated = await setProxmoxHostConfig(patch);
     return NextResponse.json(updated);

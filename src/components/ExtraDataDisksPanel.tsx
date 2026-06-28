@@ -33,6 +33,7 @@ type Props = {
   extraDisksGb?: number[];
   adjustingPlan?: boolean;
   hardwareMaintenance?: boolean;
+  backupRestoreInProgress?: boolean;
   disabled?: boolean;
   onScheduled?: () => void;
 };
@@ -46,6 +47,7 @@ export function ExtraDataDisksPanel({
   extraDisksGb = [],
   adjustingPlan = false,
   hardwareMaintenance = false,
+  backupRestoreInProgress = false,
   disabled = false,
   onScheduled,
 }: Props) {
@@ -86,7 +88,8 @@ export function ExtraDataDisksPanel({
       .catch(() => {});
   }, []);
 
-  const hardwareBusy = adjustingPlan || hardwareMaintenance;
+  const hardwareBusy =
+    adjustingPlan || hardwareMaintenance || backupRestoreInProgress;
   const blockUi = disabled || busy || hardwareBusy;
 
   const tierOptions = useMemo(() => {
@@ -173,9 +176,11 @@ export function ExtraDataDisksPanel({
           role="status"
           aria-live="polite"
         >
-          {hardwareMaintenance
-            ? "Disk operation running — server may be off briefly."
-            : "Finish plan change before editing disks."}
+          {backupRestoreInProgress
+            ? "Backup restore running — server may be off briefly."
+            : hardwareMaintenance
+              ? "Disk operation running — server may be off briefly."
+              : "Finish plan change before editing disks."}
         </p>
       ) : null}
 

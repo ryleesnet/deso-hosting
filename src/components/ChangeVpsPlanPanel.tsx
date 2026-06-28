@@ -18,6 +18,7 @@ type Props = {
   servicesById: Record<string, CatalogService>;
   adjustingPlan?: boolean;
   hardwareMaintenance?: boolean;
+  backupRestoreInProgress?: boolean;
   disabled?: boolean;
   onScheduled?: () => void;
   /** Shown when the server reported a failure (e.g. last plan change). */
@@ -50,6 +51,7 @@ export function ChangeVpsPlanPanel({
   servicesById,
   adjustingPlan = false,
   hardwareMaintenance = false,
+  backupRestoreInProgress = false,
   disabled = false,
   onScheduled,
   lastError,
@@ -114,7 +116,8 @@ export function ChangeVpsPlanPanel({
 
   const picked = alternates.find((s) => s.id === selectedId);
   const current = servicesById[currentServiceId];
-  const blockUi = adjustingPlan || hardwareMaintenance || disabled || busy;
+  const blockUi =
+    adjustingPlan || hardwareMaintenance || backupRestoreInProgress || disabled || busy;
 
   if (alternates.length === 0) {
     return null;
@@ -140,7 +143,11 @@ export function ChangeVpsPlanPanel({
           Choose another tier — the guest stops briefly during resize.
         </p>
       )}
-      {hardwareMaintenance && !adjustingPlan ? (
+      {backupRestoreInProgress && !adjustingPlan ? (
+        <p className="mt-2 text-xs text-orange-400/95" role="status">
+          Backup restore running — finish that before changing plans.
+        </p>
+      ) : hardwareMaintenance && !adjustingPlan ? (
         <p className="mt-2 text-xs text-orange-400/95" role="status">
           Extra disk attach/remove running — finish that before changing plans.
         </p>
@@ -155,7 +162,7 @@ export function ChangeVpsPlanPanel({
         </p>
       ) : null}
 
-      {!adjustingPlan && !hardwareMaintenance && current ? (
+      {!adjustingPlan && !hardwareMaintenance && !backupRestoreInProgress && current ? (
         <p className="mt-2 text-xs text-[var(--muted)]">
           Current:{" "}
           <span className="font-medium text-[var(--foreground)]">{current.name}</span> —{" "}

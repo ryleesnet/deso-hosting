@@ -104,6 +104,8 @@ export interface Order {
    * Set while extra-disk attach/detach runs (guest stopped briefly).
    */
   hardwareMaintenance?: boolean;
+  /** Set while a vzdump backup restore runs (stop → restore → start). */
+  backupRestoreInProgress?: boolean;
 }
 
 export interface Subscription {

@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { DangerZoneCollapsible } from "@/components/DangerZoneCollapsible";
+import { VmBackupsButton } from "@/components/VmBackupsButton";
 import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api-client";
@@ -258,6 +259,7 @@ export function VPSControl({
   orderId,
   deleteButton,
   onPowerFlowPending,
+  onBackupRestoreStarted,
   powerLocked = false,
   powerLockedTitle,
 }: {
@@ -269,6 +271,8 @@ export function VPSControl({
    * Do not clear on success — parent clears after `VMRunningStatus` sees the target state.
    */
   onPowerFlowPending?: (pending: VmPowerControlAction | null) => void;
+  /** Called after a backup restore job is queued (refresh order / maintenance flags). */
+  onBackupRestoreStarted?: () => void;
   /** When true, power actions and console are disabled (e.g. plan change in progress). */
   powerLocked?: boolean;
   powerLockedTitle?: string;
@@ -486,6 +490,14 @@ export function VPSControl({
               Console
             </button>
           )}
+        </div>
+        <div className="min-w-0">
+          <VmBackupsButton
+            orderId={orderId}
+            disabled={hwLocked || loading !== null}
+            disabledTitle={lockExplain}
+            onStarted={onBackupRestoreStarted}
+          />
         </div>
         {deleteButton ? (
           <DangerZoneCollapsible>

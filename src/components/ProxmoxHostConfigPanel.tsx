@@ -7,8 +7,10 @@ type ProxmoxHostConfigState = {
   defaultCloneNode?: string;
   autoPlaceNewVms?: boolean;
   defaultDiskStorage?: string;
+  backupStorage?: string;
   effectiveDefaultCloneNode?: string;
   effectiveDefaultDiskStorage?: string;
+  effectiveBackupStorage?: string;
   effectiveAutoPlaceNewVms?: boolean;
   updatedAt?: string;
 };
@@ -21,15 +23,19 @@ export function ProxmoxHostConfigPanel({ embedded = false }: { embedded?: boolea
   const [cloneNode, setCloneNode] = useState("");
   const [autoPlace, setAutoPlace] = useState(true);
   const [diskStorage, setDiskStorage] = useState("");
+  const [backupStorage, setBackupStorage] = useState("");
   const [effectiveNode, setEffectiveNode] = useState("");
   const [effectiveStorage, setEffectiveStorage] = useState("SAN_HDD");
+  const [effectiveBackupStorage, setEffectiveBackupStorage] = useState("SAN_HDD");
 
   function applyConfig(data: ProxmoxHostConfigState) {
     setCloneNode(data.defaultCloneNode ?? "");
     setAutoPlace(data.autoPlaceNewVms ?? data.effectiveAutoPlaceNewVms ?? true);
     setDiskStorage(data.defaultDiskStorage ?? "");
+    setBackupStorage(data.backupStorage ?? "");
     setEffectiveNode(data.effectiveDefaultCloneNode ?? "");
     setEffectiveStorage(data.effectiveDefaultDiskStorage ?? "SAN_HDD");
+    setEffectiveBackupStorage(data.effectiveBackupStorage ?? "SAN_HDD");
   }
 
   useEffect(() => {
@@ -71,6 +77,7 @@ export function ProxmoxHostConfigPanel({ embedded = false }: { embedded?: boolea
           defaultCloneNode: cloneNode.trim() || null,
           autoPlaceNewVms: autoPlace,
           defaultDiskStorage: diskStorage.trim() || null,
+          backupStorage: backupStorage.trim() || null,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as ProxmoxHostConfigState & {
@@ -143,6 +150,30 @@ export function ProxmoxHostConfigPanel({ embedded = false }: { embedded?: boolea
                   spellCheck={false}
                   autoComplete="off"
                 />
+              </div>
+              <div className="min-w-0 sm:col-span-2">
+                <label
+                  htmlFor="proxmox-backup-storage"
+                  className="block text-xs text-[var(--muted)]"
+                >
+                  Backup storage pool
+                </label>
+                <input
+                  id="proxmox-backup-storage"
+                  type="text"
+                  value={backupStorage}
+                  onChange={(e) => setBackupStorage(e.target.value)}
+                  placeholder={effectiveBackupStorage}
+                  className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+                <p className="mt-1 text-xs text-[var(--muted)]">
+                  Proxmox storage ID where vzdump archives for customer restores are
+                  listed. Leave blank to use disk storage (
+                  <span className="font-mono">{effectiveStorage}</span>
+                  ).
+                </p>
               </div>
             </div>
             <label className="flex cursor-pointer items-start gap-2 text-sm">

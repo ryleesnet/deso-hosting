@@ -68,9 +68,13 @@ export async function POST(
       );
     }
 
-    if (order.hardwareMaintenance) {
+    if (order.hardwareMaintenance || order.backupRestoreInProgress) {
       return NextResponse.json(
-        { error: "A disk or hardware operation is already running for this VPS." },
+        {
+          error: order.backupRestoreInProgress
+            ? "Finish the backup restore before changing disks."
+            : "A disk or hardware operation is already running for this VPS.",
+        },
         { status: 409 }
       );
     }

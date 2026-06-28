@@ -120,6 +120,8 @@ export function OrderSpecsSummary({
   adjustingPlan = false,
   /** Same for extra-disk maintenance. */
   hardwareMaintenance = false,
+  /** Same for backup restore. */
+  backupRestoreInProgress = false,
   listClassName,
   extrasFingerprint,
 }: {
@@ -128,6 +130,7 @@ export function OrderSpecsSummary({
   catalogServiceId?: string;
   adjustingPlan?: boolean;
   hardwareMaintenance?: boolean;
+  backupRestoreInProgress?: boolean;
   /** Replaces default `mt-3` on the spec list (e.g. `mt-0` in a stacked card). */
   listClassName?: string;
   /** Bump when `extraDisksGb` changes so live disk list refetches. */
@@ -156,7 +159,7 @@ export function OrderSpecsSummary({
     return () => {
       cancelled = true;
     };
-  }, [orderId, catalogServiceId, adjustingPlan, hardwareMaintenance, extrasFingerprint]);
+  }, [orderId, catalogServiceId, adjustingPlan, hardwareMaintenance, backupRestoreInProgress, extrasFingerprint]);
 
   const vcpus = specs?.vcpus ?? plan?.vcpu;
   const memoryMb = specs?.memoryMb ?? plan?.ram;

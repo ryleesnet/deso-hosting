@@ -43,6 +43,8 @@ interface Order {
   adjustingPlan?: boolean;
   /** True while extra disk attach/detach runs. */
   hardwareMaintenance?: boolean;
+  /** True while a backup restore runs. */
+  backupRestoreInProgress?: boolean;
   /** authorized_keys lines currently installed via cloud-init (server-side state). */
   cloudInitSshKeys?: string;
   cloneTemplateVmid?: number;
@@ -197,7 +199,7 @@ export default function DashboardPage() {
 
   const hasProvisioningOrder = orders.some((o) => o.status === "provisioning");
   const hasAsyncVmMaintenance = orders.some(
-    (o) => o.adjustingPlan || o.hardwareMaintenance
+    (o) => o.adjustingPlan || o.hardwareMaintenance || o.backupRestoreInProgress
   );
 
   useEffect(() => {
@@ -245,7 +247,7 @@ export default function DashboardPage() {
                 ? "Provisioning in progress — list refreshes every few seconds."
                 : hasProvisioningOrder && hasAsyncVmMaintenance
                   ? "Provisioning or hardware changes running — list refreshes every few seconds."
-                  : "Hardware change running (plan resize or disks) — VM may be off briefly."}
+                  : "Hardware change running (plan resize, disks, or backup restore) — VM may be off briefly."}
             </p>
           ) : null}
         </div>
@@ -267,7 +269,10 @@ export default function DashboardPage() {
             .filter((o) => o.status !== "cancelled")
             .map((order) => {
               const catalog = services[order.serviceId];
-              const vmLocked = !!order.adjustingPlan || !!order.hardwareMaintenance;
+              const vmLocked =
+                !!order.adjustingPlan ||
+                !!order.hardwareMaintenance ||
+                !!order.backupRestoreInProgress;
               const reinstallProfiles = effectiveTemplatesForOrder(
                 order,
                 catalog ?? {},
@@ -364,6 +369,14 @@ export default function DashboardPage() {
                             />
                             Resizing plan
                           </span>
+                        ) : order.backupRestoreInProgress ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-orange-400/35 bg-orange-400/15 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-orange-200">
+                            <span
+                              className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-orange-400"
+                              aria-hidden
+                            />
+                            Restoring backup
+                          </span>
                         ) : order.hardwareMaintenance ? (
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-orange-400/35 bg-orange-400/15 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-orange-200">
                             <span
@@ -420,6 +433,7 @@ export default function DashboardPage() {
                           catalogServiceId={order.serviceId}
                           adjustingPlan={!!order.adjustingPlan}
                           hardwareMaintenance={!!order.hardwareMaintenance}
+                          backupRestoreInProgress={!!order.backupRestoreInProgress}
                           listClassName="mt-0 flex flex-row flex-wrap gap-x-5 gap-y-2 md:gap-x-8"
                           extrasFingerprint={(order.extraDisksGb ?? []).join(",")}
                           plan={services[order.serviceId]}
@@ -437,6 +451,7 @@ export default function DashboardPage() {
                             servicesById={services}
                             adjustingPlan={!!order.adjustingPlan}
                             hardwareMaintenance={!!order.hardwareMaintenance}
+                            backupRestoreInProgress={!!order.backupRestoreInProgress}
                             lastError={order.provisionError}
                             embedded
                             disabled={
@@ -451,6 +466,7 @@ export default function DashboardPage() {
                             extraDisksGb={order.extraDisksGb}
                             adjustingPlan={!!order.adjustingPlan}
                             hardwareMaintenance={!!order.hardwareMaintenance}
+                            backupRestoreInProgress={!!order.backupRestoreInProgress}
                             disabled={!!vmPowerPendingByOrder[order.id]}
                             onScheduled={loadOrdersOnly}
                           />
@@ -516,10 +532,13 @@ export default function DashboardPage() {
                                 powerLockedTitle={
                                   order.adjustingPlan && order.hardwareMaintenance
                                     ? "VM maintenance in progress."
-                                    : order.hardwareMaintenance
-                                      ? "Disk maintenance in progress."
-                                      : "Plan change in progress."
+                                    : order.backupRestoreInProgress
+                                      ? "Backup restore in progress."
+                                      : order.hardwareMaintenance
+                                        ? "Disk maintenance in progress."
+                                        : "Plan change in progress."
                                 }
+                                onBackupRestoreStarted={loadData}
                                 onPowerFlowPending={(pending) => {
                                   setVmPowerPendingByOrder((prev) => {
                                     const next = { ...prev };

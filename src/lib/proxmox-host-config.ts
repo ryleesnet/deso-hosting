@@ -26,12 +26,15 @@ export interface ProxmoxHostConfig {
   autoPlaceNewVms?: boolean;
   /** Target storage for full VM clones and new extra data disks. */
   defaultDiskStorage?: string;
+  /** Proxmox storage pool where vzdump backups are listed for restore. */
+  backupStorage?: string;
   updatedAt?: string;
 }
 
 export type ProxmoxHostConfigEffective = ProxmoxHostConfig & {
   effectiveDefaultCloneNode: string;
   effectiveDefaultDiskStorage: string;
+  effectiveBackupStorage: string;
   effectiveAutoPlaceNewVms: boolean;
 };
 
@@ -39,6 +42,7 @@ interface RawConfigDoc {
   defaultCloneNode?: unknown;
   autoPlaceNewVms?: unknown;
   defaultDiskStorage?: unknown;
+  backupStorage?: unknown;
   updatedAt?: unknown;
 }
 
@@ -95,6 +99,7 @@ async function readFirestoreConfig(): Promise<ProxmoxHostConfig> {
         defaultCloneNode: asTrimmedString(raw.defaultCloneNode),
         autoPlaceNewVms: asBoolean(raw.autoPlaceNewVms),
         defaultDiskStorage: asTrimmedString(raw.defaultDiskStorage),
+        backupStorage: asTrimmedString(raw.backupStorage),
         updatedAt: asTrimmedString(raw.updatedAt),
       };
     }
@@ -116,15 +121,20 @@ export function invalidateProxmoxHostConfigCache(): void {
 function withEffectiveFields(fromStore: ProxmoxHostConfig): ProxmoxHostConfigEffective {
   const envNode = asTrimmedString(process.env.PROXMOX_DEFAULT_NODE);
   const envStorage = asTrimmedString(process.env.PROXMOX_DISK_STORAGE);
+  const envBackupStorage = asTrimmedString(process.env.PROXMOX_BACKUP_STORAGE);
   const envDisableAuto =
     process.env.PROXMOX_AUTO_PLACE_VMS === "0" ||
     process.env.PROXMOX_AUTO_PLACE_VMS === "false";
 
+  const effectiveDefaultDiskStorage =
+    fromStore.defaultDiskStorage ?? envStorage ?? DEFAULT_DISK_STORAGE;
+
   return {
     ...fromStore,
     effectiveDefaultCloneNode: fromStore.defaultCloneNode ?? envNode ?? "",
-    effectiveDefaultDiskStorage:
-      fromStore.defaultDiskStorage ?? envStorage ?? DEFAULT_DISK_STORAGE,
+    effectiveDefaultDiskStorage,
+    effectiveBackupStorage:
+      fromStore.backupStorage ?? envBackupStorage ?? effectiveDefaultDiskStorage,
     effectiveAutoPlaceNewVms:
       fromStore.autoPlaceNewVms !== undefined
         ? fromStore.autoPlaceNewVms
@@ -144,11 +154,18 @@ export async function resolveProxmoxDiskStoragePool(): Promise<string> {
   return cfg.effectiveDefaultDiskStorage;
 }
 
+/** Resolved storage pool for listing / restoring vzdump backups. */
+export async function resolveProxmoxBackupStoragePool(): Promise<string> {
+  const cfg = await getProxmoxHostConfig();
+  return cfg.effectiveBackupStorage;
+}
+
 /** Admin write — pass `null` to clear a Firestore override. */
 export async function setProxmoxHostConfig(patch: {
   defaultCloneNode?: string | null;
   autoPlaceNewVms?: boolean | null;
   defaultDiskStorage?: string | null;
+  backupStorage?: string | null;
 }): Promise<ProxmoxHostConfigEffective> {
   const ref = getFirestoreDb().collection(COL).doc(DEFAULT_DOC_ID);
   const update: Record<string, unknown> = {
@@ -177,6 +194,16 @@ export async function setProxmoxHostConfig(patch: {
       const validated = validateProxmoxDiskStorageId(patch.defaultDiskStorage);
       if (typeof validated === "object") throw new Error(validated.error);
       update.defaultDiskStorage = validated;
+    }
+  }
+
+  if (patch.backupStorage !== undefined) {
+    if (patch.backupStorage === null || patch.backupStorage === "") {
+      update.backupStorage = null;
+    } else {
+      const validated = validateProxmoxDiskStorageId(patch.backupStorage);
+      if (typeof validated === "object") throw new Error(validated.error);
+      update.backupStorage = validated;
     }
   }
 

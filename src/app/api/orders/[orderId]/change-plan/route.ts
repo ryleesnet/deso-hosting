@@ -73,9 +73,13 @@ export async function POST(
       );
     }
 
-    if (order.hardwareMaintenance) {
+    if (order.hardwareMaintenance || order.backupRestoreInProgress) {
       return NextResponse.json(
-        { error: "Finish the current disk operation before changing plans." },
+        {
+          error: order.backupRestoreInProgress
+            ? "Finish the backup restore before changing plans."
+            : "Finish the current disk operation before changing plans.",
+        },
         { status: 409 }
       );
     }
