@@ -15,6 +15,44 @@ import { formatUsdCents } from "@/lib/pricing";
 import { apiFetch } from "@/lib/api-client";
 import type { Order, VPSService } from "@/lib/db";
 
+/** Enriched row from `/api/orders?as=all`. */
+type AdminOrderBilling = {
+  subscriptionId: string;
+  lastPaymentAt: string;
+  nextPaymentAt: string;
+  subscriptionStatus: string;
+  daysRemainingInCycle: number;
+};
+
+type AdminOrder = Order & {
+  billing?: AdminOrderBilling | null;
+  desoUsername?: string | null;
+};
+
+function fmtDesoUsernameLabel(username?: string | null): string | null {
+  if (!username?.trim()) return null;
+  const t = username.trim().replace(/^@/, "");
+  return t ? `@${t}` : null;
+}
+
+function fmtAdminBillingDate(iso?: string | null): string {
+  if (!iso?.trim()) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  return `${mm}/${dd}/${yyyy}`;
+}
+
+function todayDateInputValue(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 /** Enriched row from `/api/admin/services` (DeSo preview computed server-side). */
 type AdminListedService = VPSService & { pricePreviewNanos?: number };
 
@@ -30,7 +68,7 @@ interface PublicIpRecord {
 export default function AdminPage() {
   const { user, isAdmin } = useAuth();
   const [services, setServices] = useState<AdminListedService[]>([]);
-  const [orders, setOrders] = useState<Order[]>([]);
+  const [orders, setOrders] = useState<AdminOrder[]>([]);
   const [publicIps, setPublicIps] = useState<PublicIpRecord[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -57,7 +95,6 @@ export default function AdminPage() {
   const [ipFilterOrderId, setIpFilterOrderId] = useState("");
   const [ipFilterVmid, setIpFilterVmid] = useState("");
 
-  const [orderFilterOrderId, setOrderFilterOrderId] = useState("");
   const [orderFilterUserId, setOrderFilterUserId] = useState("");
   const [orderFilterVmid, setOrderFilterVmid] = useState("");
   const [orderFilterPublicIp, setOrderFilterPublicIp] = useState("");
@@ -129,11 +166,13 @@ export default function AdminPage() {
         return false;
       }
 
-      const orderQ = orderFilterOrderId.trim().toLowerCase();
-      if (orderQ && !o.id.toLowerCase().includes(orderQ)) return false;
-
       const userQ = orderFilterUserId.trim().toLowerCase();
-      if (userQ && !o.userId.toLowerCase().includes(userQ)) return false;
+      if (userQ) {
+        const q = userQ.replace(/^@/, "");
+        const pkMatch = o.userId.toLowerCase().includes(q);
+        const nameMatch = (o.desoUsername ?? "").toLowerCase().includes(q);
+        if (!pkMatch && !nameMatch) return false;
+      }
 
       const vmidQ = orderFilterVmid.trim();
       if (vmidQ) {
@@ -153,7 +192,6 @@ export default function AdminPage() {
     });
   }, [
     orders,
-    orderFilterOrderId,
     orderFilterUserId,
     orderFilterVmid,
     orderFilterPublicIp,
@@ -163,14 +201,12 @@ export default function AdminPage() {
 
   const orderFiltersActive =
     orderFilterStatus !== "" ||
-    !!orderFilterOrderId.trim() ||
     !!orderFilterUserId.trim() ||
     !!orderFilterVmid.trim() ||
     !!orderFilterPublicIp.trim() ||
     !!orderFilterNode.trim();
 
   function clearOrderFilters() {
-    setOrderFilterOrderId("");
     setOrderFilterUserId("");
     setOrderFilterVmid("");
     setOrderFilterPublicIp("");
@@ -290,6 +326,73 @@ export default function AdminPage() {
 
   const [provisionError, setProvisionError] = useState<string | null>(null);
   const [orderSuspendBusy, setOrderSuspendBusy] = useState<string | null>(null);
+  const paymentDialogRef = useRef<HTMLDialogElement>(null);
+  const [paymentOrderId, setPaymentOrderId] = useState<string | null>(null);
+  const [paymentDate, setPaymentDate] = useState(() => todayDateInputValue());
+  const [paymentMonths, setPaymentMonths] = useState(1);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [notifyBusy, setNotifyBusy] = useState<string | null>(null);
+  const [notifyError, setNotifyError] = useState<string | null>(null);
+
+  function openPaymentDialog(orderId: string) {
+    setPaymentOrderId(orderId);
+    setPaymentDate(todayDateInputValue());
+    setPaymentMonths(1);
+    setPaymentError(null);
+    paymentDialogRef.current?.showModal();
+  }
+
+  async function submitManualPayment() {
+    if (!paymentOrderId) return;
+    setPaymentError(null);
+    setPaymentBusy(true);
+    try {
+      const res = await apiFetch(
+        `/api/admin/orders/${paymentOrderId}/record-payment`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lastPaymentAt: paymentDate.trim(),
+            months: paymentMonths,
+          }),
+        }
+      );
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+      paymentDialogRef.current?.close();
+      setPaymentOrderId(null);
+      loadData();
+    } catch (e) {
+      setPaymentError(e instanceof Error ? e.message : "Failed to record payment");
+    } finally {
+      setPaymentBusy(false);
+    }
+  }
+
+  async function handleNotifyPastDue(orderId: string) {
+    setNotifyError(null);
+    setNotifyBusy(orderId);
+    try {
+      const res = await apiFetch(
+        `/api/admin/orders/${orderId}/notify-past-due`,
+        { method: "POST" }
+      );
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+    } catch (e) {
+      setNotifyError(
+        e instanceof Error ? e.message : "Failed to send notification"
+      );
+    } finally {
+      setNotifyBusy(null);
+    }
+  }
 
   /** Import existing VM: link Firestore order + subscription without cloning. */
   const [importUserId, setImportUserId] = useState("");
@@ -501,6 +604,17 @@ export default function AdminPage() {
             </button>
           </div>
         )}
+        {notifyError && (
+          <div className="mt-4 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm text-red-400">
+            {notifyError}
+            <button
+              onClick={() => setNotifyError(null)}
+              className="ml-2 underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <p className="mt-2 text-xs text-[var(--muted)]">
           Cancelled orders are hidden by default. Choose &quot;All statuses&quot; in the status
           filter to include cancelled rows, or choose &quot;cancelled&quot; to show only those.
@@ -539,11 +653,12 @@ export default function AdminPage() {
           </div>
         </div>
         <div className="mt-2 max-h-[31rem] overflow-auto rounded-2xl border border-[var(--card-border)]">
-          <table className="w-full min-w-[720px] text-sm">
+          <table className="w-full min-w-[960px] text-sm">
             <thead className="sticky top-0 z-10 bg-[var(--card)] shadow-[0_1px_0_var(--card-border)]">
               <tr>
-                <th className="px-3 py-3 text-left font-medium">Order</th>
-                <th className="px-3 py-3 text-left font-medium">User</th>
+                <th className="px-3 py-3 text-left font-medium min-w-[12rem]">User</th>
+                <th className="px-3 py-3 text-left font-medium">Last payment</th>
+                <th className="px-3 py-3 text-left font-medium">Expiration</th>
                 <th className="px-3 py-3 text-left font-medium">VMID</th>
                 <th className="px-3 py-3 text-left font-medium">Public IP</th>
                 <th className="px-3 py-3 text-left font-medium">Node</th>
@@ -556,20 +671,6 @@ export default function AdminPage() {
                   className="border-b border-[var(--card-border)]"
                 >
                   <th className="px-3 py-2 align-bottom font-normal">
-                    <label className="sr-only" htmlFor="order-filter-order-id">
-                      Filter by order ID
-                    </label>
-                    <input
-                      id="order-filter-order-id"
-                      type="text"
-                      value={orderFilterOrderId}
-                      onChange={(e) => setOrderFilterOrderId(e.target.value)}
-                      placeholder="Order ID"
-                      className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
-                      aria-label="Filter by order ID substring"
-                    />
-                  </th>
-                  <th className="px-3 py-2 align-bottom font-normal">
                     <label className="sr-only" htmlFor="order-filter-user-id">
                       Filter by user public key
                     </label>
@@ -578,11 +679,13 @@ export default function AdminPage() {
                       type="text"
                       value={orderFilterUserId}
                       onChange={(e) => setOrderFilterUserId(e.target.value)}
-                      placeholder="Public key"
+                      placeholder="Username or public key"
                       className="w-full min-w-[6rem] rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-xs placeholder:font-sans"
-                      aria-label="Filter by user public key substring"
+                      aria-label="Filter by DeSo username or public key"
                     />
                   </th>
+                  <th className="px-3 py-2 align-bottom font-normal" aria-hidden />
+                  <th className="px-3 py-2 align-bottom font-normal" aria-hidden />
                   <th className="px-3 py-2 align-bottom font-normal">
                     <label className="sr-only" htmlFor="order-filter-vmid">
                       Filter by VMID
@@ -653,13 +756,13 @@ export default function AdminPage() {
             <tbody>
               {orders.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-[var(--muted)]">
+                  <td colSpan={8} className="px-3 py-8 text-center text-[var(--muted)]">
                     No orders.
                   </td>
                 </tr>
               ) : filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-[var(--muted)]">
+                  <td colSpan={8} className="px-3 py-8 text-center text-[var(--muted)]">
                     No orders match the current filters.
                   </td>
                 </tr>
@@ -669,27 +772,43 @@ export default function AdminPage() {
                     key={o.id}
                     className="border-b border-[var(--card-border)] last:border-0"
                   >
-                    <td className="px-3 py-3 font-mono text-xs">
-                      <button
-                        type="button"
-                        onClick={(e) => void copyOrderAdminField(o.id, "order ID", e)}
-                        className="max-w-full cursor-pointer truncate text-left underline-offset-2 hover:underline"
-                        title="Copy full order ID"
-                      >
-                        {o.id.slice(0, 8)}...
-                      </button>
+                    <td className="px-3 py-3 text-sm align-top">
+                      {(() => {
+                        const handle = fmtDesoUsernameLabel(o.desoUsername);
+                        return (
+                          <button
+                            type="button"
+                            onClick={(e) =>
+                              void copyOrderAdminField(o.userId, "user public key", e)
+                            }
+                            className="cursor-pointer text-left underline-offset-2 hover:underline"
+                            title={
+                              handle
+                                ? `Copy public key (${o.userId})`
+                                : "Copy public key"
+                            }
+                          >
+                            {handle ?? (
+                              <span className="font-mono text-xs text-[var(--muted)]">
+                                {o.userId.slice(0, 16)}…
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })()}
                     </td>
-                    <td className="px-3 py-3 font-mono text-xs">
-                      <button
-                        type="button"
-                        onClick={(e) =>
-                          void copyOrderAdminField(o.userId, "user public key", e)
-                        }
-                        className="max-w-full cursor-pointer truncate text-left underline-offset-2 hover:underline"
-                        title="Copy full user public key"
-                      >
-                        {o.userId.slice(0, 12)}...
-                      </button>
+                    <td className="px-3 py-3 text-xs whitespace-nowrap align-top">
+                      {fmtAdminBillingDate(o.billing?.lastPaymentAt)}
+                    </td>
+                    <td className="px-3 py-3 text-xs align-top">
+                      <span className="whitespace-nowrap">
+                        {fmtAdminBillingDate(o.billing?.nextPaymentAt)}
+                      </span>
+                      {o.billing?.subscriptionStatus === "past_due" ? (
+                        <span className="mt-0.5 block text-[10px] font-medium uppercase tracking-wide text-amber-400">
+                          Past due
+                        </span>
+                      ) : null}
                     </td>
                     <td className="px-3 py-3 tabular-nums">
                       {o.vmid > 0 ? (
@@ -762,8 +881,27 @@ export default function AdminPage() {
                         {o.status}
                       </span>
                     </td>
-                    <td className="px-3 py-3">
+                    <td className="px-3 py-3 align-top">
                       <div className="flex flex-wrap items-center gap-2">
+                      {o.billing ? (
+                        <button
+                          type="button"
+                          onClick={() => openPaymentDialog(o.id)}
+                          className="rounded border border-[var(--accent)]/50 px-2 py-1 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/10"
+                        >
+                          Record payment
+                        </button>
+                      ) : null}
+                      {o.billing?.subscriptionStatus === "past_due" ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleNotifyPastDue(o.id)}
+                          disabled={notifyBusy === o.id}
+                          className="rounded border border-amber-500/50 px-2 py-1 text-xs text-amber-400 hover:bg-amber-500/10 disabled:opacity-50"
+                        >
+                          {notifyBusy === o.id ? "Sending…" : "Notify past due"}
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => {
@@ -926,6 +1064,90 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
+
+        <dialog
+          ref={paymentDialogRef}
+          aria-labelledby="admin-record-payment-title"
+          className="fixed left-1/2 top-1/2 z-50 m-0 max-h-[90vh] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border border-[var(--card-border)] bg-[var(--card)] p-6 text-[var(--foreground)] shadow-xl backdrop:bg-black/50"
+          onClose={() => {
+            setPaymentOrderId(null);
+            setPaymentError(null);
+            setPaymentBusy(false);
+          }}
+        >
+          <div className="flex flex-col gap-4">
+            <div>
+              <p id="admin-record-payment-title" className="text-lg font-semibold">
+                Record manual payment
+              </p>
+              <p className="mt-2 text-sm text-[var(--muted)]">
+                Marks the subscription as paid off-chain and extends the billing cycle.
+                Suspended VPS orders are reactivated when payment is recorded.
+              </p>
+            </div>
+            <div>
+              <label
+                htmlFor="admin-payment-date"
+                className="block text-xs text-[var(--muted)]"
+              >
+                Payment date
+              </label>
+              <input
+                id="admin-payment-date"
+                type="date"
+                value={paymentDate}
+                onChange={(e) => setPaymentDate(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+                disabled={paymentBusy}
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="admin-payment-months"
+                className="block text-xs text-[var(--muted)]"
+              >
+                Months covered
+              </label>
+              <select
+                id="admin-payment-months"
+                value={paymentMonths}
+                onChange={(e) => setPaymentMonths(parseInt(e.target.value, 10))}
+                className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm"
+                disabled={paymentBusy}
+              >
+                <option value={1}>1 month</option>
+                <option value={2}>2 months</option>
+                <option value={3}>3 months</option>
+              </select>
+              <p className="mt-1 text-xs text-[var(--muted)]">
+                Expiration is the payment date plus the months selected above.
+              </p>
+            </div>
+            {paymentError ? (
+              <p className="text-sm text-red-400" role="alert">
+                {paymentError}
+              </p>
+            ) : null}
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                className="rounded-lg border border-[var(--card-border)] px-4 py-2 text-sm hover:bg-[var(--background)]"
+                onClick={() => paymentDialogRef.current?.close()}
+                disabled={paymentBusy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
+                onClick={() => void submitManualPayment()}
+                disabled={paymentBusy || !paymentDate.trim()}
+              >
+                {paymentBusy ? "Saving…" : "Record payment"}
+              </button>
+            </div>
+          </div>
+        </dialog>
       </section>
 
       {/* Import existing VM (production / manual onboarding) */}

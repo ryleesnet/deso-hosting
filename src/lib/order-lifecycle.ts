@@ -3,6 +3,11 @@
  */
 
 import {
+  effectiveSubscriptionStatus,
+  isPaymentOverdue,
+} from "@/lib/billing";
+import { sendBillingDmNotifications } from "@/lib/billing-notifications";
+import {
   getOrder,
   getOrders,
   getSubscriptions,
@@ -18,6 +23,36 @@ export function suspendAfterPastDueDays(): number {
   const n = raw ? parseInt(raw, 10) : 30;
   return Number.isFinite(n) && n > 0 ? n : 30;
 }
+
+let lastDunningRunAt = 0;
+
+function dunningMinIntervalMs(): number {
+  const raw = process.env.BILLING_DUNNING_MIN_INTERVAL_MS?.trim();
+  const n = raw ? parseInt(raw, 10) : 300_000; // 5 min default
+  return Number.isFinite(n) && n > 0 ? n : 300_000;
+}
+
+/** Mark overdue subs past_due, suspend VPS past grace, and send billing DMs. */
+export async function runBillingDunning(): Promise<{
+  markedPastDue: number;
+  suspendedOrderIds: string[];
+  billingDms: Awaited<ReturnType<typeof sendBillingDmNotifications>>;
+}> {
+  const markedPastDue = await markPastDueSubscriptions();
+  const { suspended } = await autoSuspendDelinquentOrders();
+  const billingDms = await sendBillingDmNotifications();
+  lastDunningRunAt = Date.now();
+  return { markedPastDue, suspendedOrderIds: suspended, billingDms };
+}
+
+/** Throttled dunning for request paths (dashboard load, etc.). */
+export async function runBillingDunningIfDue(): Promise<void> {
+  const now = Date.now();
+  if (now - lastDunningRunAt < dunningMinIntervalMs()) return;
+  await runBillingDunning();
+}
+
+export { effectiveSubscriptionStatus, isPaymentOverdue };
 
 /** Set subscription to `past_due` when `nextPaymentAt` is in the past and status was `active`. */
 export async function markPastDueSubscriptions(): Promise<number> {

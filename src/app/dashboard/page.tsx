@@ -395,6 +395,16 @@ export default function DashboardPage() {
                             Provisioning
                           </span>
                         ) : null}
+                        {order.status === "active" &&
+                        order.billing?.subscriptionStatus === "past_due" ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full border border-orange-500/40 bg-orange-500/15 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-orange-200">
+                            <span
+                              className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-orange-400"
+                              aria-hidden
+                            />
+                            Past due
+                          </span>
+                        ) : null}
                         {order.status === "suspended" ? (
                           <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-amber-100">
                             Suspended — renew required

@@ -9,6 +9,7 @@ const COL_SERVICES = "services";
 const COL_ORDERS = "orders";
 const COL_SUBSCRIPTIONS = "subscriptions";
 const COL_RENEWAL_TXS = "renewal_txs";
+const COL_BILLING_DM_NOTIFICATIONS = "billing_dm_notifications";
 /** Global QEMU templates (label → Proxmox template VMID) shown at checkout and reinstall. */
 const COL_OS_TEMPLATES = "os_templates";
 
@@ -389,6 +390,62 @@ export async function commitSubscriptionRenewalWithTxRecord(params: {
 
     return "applied";
   });
+}
+
+/** Admin-recorded off-chain payment — updates subscription dates and reactivates billing. */
+export async function recordManualSubscriptionPayment(params: {
+  subscriptionId: string;
+  lastPaymentAt: string;
+  nextPaymentAt: string;
+}): Promise<void> {
+  const updated = await updateSubscription(params.subscriptionId, {
+    lastPaymentAt: params.lastPaymentAt,
+    nextPaymentAt: params.nextPaymentAt,
+    status: "active",
+  });
+  if (!updated) {
+    throw new Error("SUBSCRIPTION_GONE");
+  }
+}
+
+export type BillingDmNotificationKind =
+  | "renewal_minus_5"
+  | "renewal_due"
+  | "renewal_plus_5"
+  | "suspend_minus_5"
+  | "suspend_due"
+  | "suspend_plus_5"
+  | "manual_past_due";
+
+export interface BillingDmNotificationRecord {
+  orderId: string;
+  subscriptionId: string;
+  userId: string;
+  kind: BillingDmNotificationKind;
+  /** UTC date key for the subscription `nextPaymentAt` when sent (billing cycle anchor). */
+  billingAnchorDate: string;
+  sentAt: string;
+}
+
+export async function getBillingDmNotification(
+  orderId: string,
+  kind: BillingDmNotificationKind,
+  billingAnchorDate: string
+): Promise<BillingDmNotificationRecord | undefined> {
+  const id = `${orderId}:${kind}:${billingAnchorDate}`;
+  const doc = await db().collection(COL_BILLING_DM_NOTIFICATIONS).doc(id).get();
+  if (!doc.exists) return undefined;
+  return doc.data() as BillingDmNotificationRecord;
+}
+
+export async function recordBillingDmNotification(
+  record: BillingDmNotificationRecord
+): Promise<void> {
+  const id = `${record.orderId}:${record.kind}:${record.billingAnchorDate}`;
+  await db()
+    .collection(COL_BILLING_DM_NOTIFICATIONS)
+    .doc(id)
+    .set(forFirestore(record));
 }
 
 // --- Global OS templates (Firestore `os_templates`) — checkout / reinstall catalogue

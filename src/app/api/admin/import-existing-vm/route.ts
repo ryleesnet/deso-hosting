@@ -8,6 +8,7 @@ import {
 import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
 import { adminPatchPublicIpRecord } from "@/lib/public-ip-store";
 import { requireAdmin } from "@/lib/api-auth";
+import { parsePaymentDate } from "@/lib/renewal-months";
 
 function parseExtraDisks(raw: unknown): number[] | undefined {
   if (raw == null) return undefined;
@@ -31,17 +32,6 @@ function parseExtraDisks(raw: unknown): number[] | undefined {
 function looksLikePublicKey(k: string): boolean {
   const t = k.trim();
   return t.length >= 32 && t.length <= 256;
-}
-
-/** `YYYY-MM-DD` → noon UTC avoids timezone day shifts; otherwise parse as ISO/datetime. */
-function parsePaymentDate(raw: string): Date | null {
-  const t = raw.trim();
-  if (!t) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) {
-    return new Date(`${t}T12:00:00.000Z`);
-  }
-  const d = new Date(t);
-  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 export async function POST(req: NextRequest) {

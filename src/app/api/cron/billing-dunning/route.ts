@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  autoSuspendDelinquentOrders,
-  markPastDueSubscriptions,
-} from "@/lib/order-lifecycle";
+import { runBillingDunning } from "@/lib/order-lifecycle";
 
 /**
  * POST /api/cron/billing-dunning
@@ -26,13 +23,8 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const markedPastDue = await markPastDueSubscriptions();
-    const { suspended } = await autoSuspendDelinquentOrders();
-    return NextResponse.json({
-      ok: true,
-      markedPastDue,
-      suspendedOrderIds: suspended,
-    });
+    const result = await runBillingDunning();
+    return NextResponse.json({ ok: true, ...result });
   } catch (e) {
     console.error("[cron/billing-dunning]", e);
     return NextResponse.json(

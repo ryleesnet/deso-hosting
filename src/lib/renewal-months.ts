@@ -40,3 +40,25 @@ export function computeNextPaymentAfterRenewal(
   next.setMonth(next.getMonth() + m);
   return next.toISOString();
 }
+
+/** Manual payment: expiration = payment date + N calendar months. */
+export function computeExpirationFromPaymentDate(
+  paymentDate: Date,
+  months: number
+): Date {
+  const m = Math.min(MAX_RENEWAL_MONTHS, Math.max(1, Math.floor(months)));
+  const next = new Date(paymentDate.getTime());
+  next.setUTCMonth(next.getUTCMonth() + m);
+  return next;
+}
+
+/** `YYYY-MM-DD` → noon UTC avoids timezone day shifts; otherwise parse as ISO/datetime. */
+export function parsePaymentDate(raw: string): Date | null {
+  const t = raw.trim();
+  if (!t) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+    return new Date(`${t}T12:00:00.000Z`);
+  }
+  const d = new Date(t);
+  return Number.isNaN(d.getTime()) ? null : d;
+}

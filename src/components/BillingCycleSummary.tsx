@@ -4,6 +4,8 @@ export type BillingInfo = {
   nextPaymentAt: string;
   subscriptionStatus: string;
   daysRemainingInCycle: number;
+  daysPastDue?: number;
+  daysUntilSuspension?: number;
 };
 
 function IconWrap({ children }: { children: React.ReactNode }) {
@@ -53,8 +55,17 @@ export function BillingCycleSummary({
   }
 
   const n = billing.daysRemainingInCycle;
-  const dayLabel =
-    n === 0 ? "0 days — renewal due" : `${n} day${n === 1 ? "" : "s"} left in billing cycle`;
+  const overdue = billing.subscriptionStatus === "past_due";
+  const daysPast = billing.daysPastDue ?? 0;
+  const daysUntilSuspend = billing.daysUntilSuspension ?? 0;
+
+  const dayLabel = overdue
+    ? daysPast === 1
+      ? "Past due — 1 day overdue"
+      : `Past due — ${daysPast} days overdue`
+    : n === 0
+      ? "0 days — renewal due"
+      : `${n} day${n === 1 ? "" : "s"} left in billing cycle`;
 
   const renewal = new Date(billing.nextPaymentAt);
   const renewalText = Number.isNaN(renewal.getTime())
@@ -64,8 +75,6 @@ export function BillingCycleSummary({
         month: "short",
         day: "numeric",
       });
-
-  const overdue = billing.subscriptionStatus === "past_due";
 
   return (
     <ul
@@ -88,10 +97,20 @@ export function BillingCycleSummary({
             {dayLabel}
           </span>
           {renewalText ? (
-            <span className="text-[var(--muted)]"> · Next renewal {renewalText}</span>
+            <span className="text-[var(--muted)]">
+              {" "}
+              · Renewal was due {renewalText}
+            </span>
           ) : null}
         </span>
       </li>
+      {overdue && daysUntilSuspend > 0 ? (
+        <li className="text-xs text-amber-400/95">
+          {daysUntilSuspend === 1
+            ? "Service suspends tomorrow if unpaid."
+            : `Service suspends in ${daysUntilSuspend} days if unpaid.`}
+        </li>
+      ) : null}
     </ul>
   );
 }
