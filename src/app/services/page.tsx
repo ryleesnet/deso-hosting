@@ -5,6 +5,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import { formatDesoDisplay } from "@/lib/deso";
 import { formatUsdCents } from "@/lib/pricing";
+import { apiFetch } from "@/lib/api-client";
 
 interface VPSService {
   id: string;
@@ -17,6 +18,8 @@ interface VPSService {
   pricePreviewNanos?: number;
   priceNanos?: number;
   active: boolean;
+  /** Admin-only plan; only surfaced to admins by the API. */
+  testing?: boolean;
 }
 
 export default function ServicesPage() {
@@ -25,11 +28,17 @@ export default function ServicesPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/services")
+    // Logged-in requests go through apiFetch so the JWT is attached — that's
+    // how the server knows the caller is an admin and includes admin-only
+    // plans (testing / inactive). Anonymous visitors fall back to plain fetch.
+    const request = user
+      ? apiFetch("/api/services").catch(() => fetch("/api/services"))
+      : fetch("/api/services");
+    Promise.resolve(request)
       .then((r) => r.json())
       .then(setServices)
       .finally(() => setLoading(false));
-  }, []);
+  }, [user]);
 
   if (loading) {
     return (
@@ -66,7 +75,22 @@ export default function ServicesPage() {
               key={s.id}
               className="flex flex-col rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6 transition hover:border-[var(--accent)]/50"
             >
-              <h3 className="text-xl font-semibold">{s.name}</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-xl font-semibold">{s.name}</h3>
+                {s.testing && (
+                  <span
+                    className="rounded-full border border-purple-500/40 bg-purple-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-200"
+                    title="Testing plan — hidden from non-admin users."
+                  >
+                    Testing · admins only
+                  </span>
+                )}
+                {!s.active && (
+                  <span className="rounded-full border border-[var(--card-border)] bg-[var(--background)]/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                    Inactive
+                  </span>
+                )}
+              </div>
               <p className="mt-2 flex-1 text-sm text-[var(--muted)]">
                 {s.description}
               </p>

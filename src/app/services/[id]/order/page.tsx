@@ -4,8 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
-import { payWithDeSo, formatDesoDisplay } from "@/lib/deso";
+import { payWithDeSo, payWithDUSDC, formatDesoDisplay } from "@/lib/deso";
 import { formatUsdCents } from "@/lib/pricing";
+import type { PaymentToken } from "@/lib/deso-tokens";
+import { formatDusdcAmount } from "@/lib/deso-tokens";
 import {
   extraDisksAddonUsdCents,
   extraDisksProvisionedGbTotal,
@@ -89,6 +91,7 @@ export default function OrderPage() {
   } | null>(null);
   const [orderKeyCopyHint, setOrderKeyCopyHint] = useState<string | null>(null);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [paymentToken, setPaymentToken] = useState<PaymentToken>("DESO");
   /** Catalogue image profile ID for provisioning (ignored when plan has ≤1 implicit image). */
   const [selectedImageProfileId, setSelectedImageProfileId] = useState("");
   /** Global catalogue from `/api/os-templates` (Firestore). */
@@ -147,7 +150,10 @@ export default function OrderPage() {
       router.push("/");
       return;
     }
-    fetch(`/api/services/${params.id}`)
+    // apiFetch attaches the caller's JWT so testing (admin-only) plans resolve
+    // for admins — plain fetch would get a 404 because the server can't tell
+    // the anonymous request is from an admin.
+    apiFetch(`/api/services/${params.id}`)
       .then((r) => r.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
@@ -249,12 +255,13 @@ export default function OrderPage() {
           "Paste your SSH public key, or choose password-only / generate a new key."
         );
       }
-      const paymentResult = await payWithDeSo(
-        PAYMENT_PUBLIC_KEY,
-        payNanos,
-        `DeSoHosting: ${service.name} (${formatUsdCents(totalUsdCents)})`
-      );
+      const memo = `DeSoHosting: ${service.name} (${formatUsdCents(totalUsdCents)})`;
+      const paymentResult =
+        paymentToken === "DUSDC"
+          ? await payWithDUSDC(PAYMENT_PUBLIC_KEY, totalUsdCents, memo)
+          : await payWithDeSo(PAYMENT_PUBLIC_KEY, payNanos, memo);
       const txHash =
+        (paymentResult as { submittedTransactionResponse?: { TxnHashHex?: string; TransactionHashHex?: string } })?.submittedTransactionResponse?.TxnHashHex ||
         (paymentResult as { submittedTransactionResponse?: { TransactionHashHex?: string } })?.submittedTransactionResponse?.TransactionHashHex ||
         (paymentResult as { constructedTransactionResponse?: { TransactionIDHex?: string } })?.constructedTransactionResponse?.TransactionIDHex;
 
@@ -264,6 +271,7 @@ export default function OrderPage() {
         body: JSON.stringify({
           serviceId: service.id,
           txHash: txHash || undefined,
+          paymentToken,
           desoUsername: user.username,
           extraDisksGb: extraDisksGb.length ? extraDisksGb : undefined,
           ...(profilesCheckout.length
@@ -450,19 +458,30 @@ export default function OrderPage() {
               <dt className="text-[var(--foreground)]">Total USD (monthly)</dt>
               <dd className="font-semibold tabular-nums">{totalUsdLine}</dd>
             </div>
-            <div className="flex justify-between gap-4">
-              <dt className="text-[var(--muted)]">DeSo (this charge)</dt>
-              <dd className="font-medium tabular-nums text-[var(--accent)]">
-                {quoteLoading && !previewDeso ? (
-                  <span className="text-[var(--muted)]">Loading…</span>
-                ) : previewDeso ? (
-                  <>{previewDeso} DESO</>
-                ) : (
-                  <span className="text-red-400">—</span>
-                )}
-              </dd>
-            </div>
-            {quote && (
+            {paymentToken === "DESO" ? (
+              <div className="flex justify-between gap-4">
+                <dt className="text-[var(--muted)]">DeSo (this charge)</dt>
+                <dd className="font-medium tabular-nums text-[var(--accent)]">
+                  {quoteLoading && !previewDeso ? (
+                    <span className="text-[var(--muted)]">Loading…</span>
+                  ) : previewDeso ? (
+                    <>{previewDeso} DESO</>
+                  ) : (
+                    <span className="text-red-400">—</span>
+                  )}
+                </dd>
+              </div>
+            ) : (
+              <div className="flex justify-between gap-4">
+                <dt className="text-[var(--muted)]">dUSDC (this charge)</dt>
+                <dd className="font-medium tabular-nums text-[var(--accent)]">
+                  {formatDusdcAmount(
+                    service.priceUsdCents + extraAddonCents
+                  )}
+                </dd>
+              </div>
+            )}
+            {paymentToken === "DESO" && quote && (
               <p className="pt-1 text-xs text-[var(--muted)]">
                 Rate: ~${quote.usdPerDeso.toFixed(4)} USD per 1 DESO
                 {quote.rateSource === "env"
@@ -470,10 +489,51 @@ export default function OrderPage() {
                   : " (from DeSo node exchange rate)"}
               </p>
             )}
+            {paymentToken === "DUSDC" && (
+              <p className="pt-1 text-xs text-[var(--muted)]">
+                Fixed peg: 1 dUSDC = $1 (wrapped USDC on DeSo)
+              </p>
+            )}
           </dl>
-          {quoteError && (
+          {quoteError && paymentToken === "DESO" && (
             <p className="mt-2 text-xs text-red-400">{quoteError}</p>
           )}
+          <div className="mt-4">
+            <p className="text-xs font-medium text-[var(--muted)]">Pay with</p>
+            <div
+              className="mt-2 flex flex-wrap gap-2"
+              role="radiogroup"
+              aria-label="Payment token"
+            >
+              {(
+                [
+                  { id: "DESO" as const, label: "DESO" },
+                  { id: "DUSDC" as const, label: "dUSDC" },
+                ]
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={paymentToken === opt.id}
+                  disabled={ordering}
+                  onClick={() => setPaymentToken(opt.id)}
+                  className={
+                    paymentToken === opt.id
+                      ? "rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--background)]"
+                      : "rounded-lg border border-[var(--card-border)] bg-[var(--background)]/30 px-3 py-1.5 text-sm hover:bg-[var(--card)] disabled:opacity-50"
+                  }
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              dUSDC is the USD-pegged wrapped-USDC DeSo Token (1 dUSDC ≈ $1).
+              Your Identity wallet must hold a balance and will prompt for a
+              token-transfer permission.
+            </p>
+          </div>
         </div>
 
         {imageProfilesCatalog.length > 0 ? (
@@ -688,11 +748,17 @@ export default function OrderPage() {
         <button
           onClick={handleOrder}
           disabled={
-            ordering || quoteLoading || !!quoteError || !acceptedTerms
+            ordering ||
+            (paymentToken === "DESO" && (quoteLoading || !!quoteError)) ||
+            !acceptedTerms
           }
           className="mt-6 w-full rounded-lg bg-[var(--accent)] py-3 font-medium text-[var(--background)] transition hover:bg-[var(--accent-muted)] disabled:opacity-50"
         >
-          {ordering ? "Processing..." : "Pay with DeSo & Order"}
+          {ordering
+            ? "Processing..."
+            : paymentToken === "DUSDC"
+              ? "Pay with dUSDC & Order"
+              : "Pay with DeSo & Order"}
         </button>
       </div>
     </div>

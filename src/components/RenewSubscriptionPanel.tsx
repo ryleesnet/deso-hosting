@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { payWithDeSo } from "@/lib/deso";
+import { payWithDeSo, payWithDUSDC } from "@/lib/deso";
 import { getDesoPaymentRecipientPublicKey } from "@/lib/payment-public-key";
 import {
   MAX_RENEWAL_MONTHS,
   renewMemoFull,
 } from "@/lib/renewal-months";
 import { apiFetch } from "@/lib/api-client";
+import type { PaymentToken } from "@/lib/deso-tokens";
 
 type RenewQuote = {
   orderId: string;
@@ -16,9 +17,12 @@ type RenewQuote = {
   maxRenewalMonths: number;
   monthlyUsdFormatted: string;
   totalUsdFormatted: string;
+  totalUsdCents: number;
   monthlyDesoFormatted: string;
   desoFormatted: string;
   amountNanos: number;
+  monthlyDusdcFormatted: string;
+  dusdcFormatted: string;
   usdPerDeso: number;
   rateSource: string;
   nextPaymentAt: string;
@@ -33,6 +37,7 @@ export function RenewSubscriptionPanel(props: {
   const { orderId, onSuccess } = props;
   const payee = getDesoPaymentRecipientPublicKey();
   const [months, setMonths] = useState(1);
+  const [paymentToken, setPaymentToken] = useState<PaymentToken>("DESO");
   const [quote, setQuote] = useState<RenewQuote | null>(null);
   const [loading, setLoading] = useState(false);
   const [paying, setPaying] = useState(false);
@@ -65,6 +70,7 @@ export function RenewSubscriptionPanel(props: {
     if (!payee || !quote) return;
     const monthsToPay = months;
     let amountNanos = quote.amountNanos;
+    let usdCents = quote.totalUsdCents;
     try {
       const res = await apiFetch(
         `/api/pricing/renew-quote?orderId=${encodeURIComponent(orderId)}&months=${monthsToPay}`
@@ -72,6 +78,7 @@ export function RenewSubscriptionPanel(props: {
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "Quote failed");
       amountNanos = data.amountNanos as number;
+      usdCents = data.totalUsdCents as number;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not refresh quote");
       return;
@@ -81,7 +88,10 @@ export function RenewSubscriptionPanel(props: {
     setPaying(true);
     setError(null);
     try {
-      const paymentResult = await payWithDeSo(payee, amountNanos, memo);
+      const paymentResult =
+        paymentToken === "DUSDC"
+          ? await payWithDUSDC(payee, usdCents, memo)
+          : await payWithDeSo(payee, amountNanos, memo);
       const txHash =
         (
           paymentResult as {
@@ -98,6 +108,7 @@ export function RenewSubscriptionPanel(props: {
           orderId,
           txHash,
           months: monthsToPay,
+          paymentToken,
         }),
       });
       const renewData = await renewRes.json();
@@ -164,6 +175,38 @@ export function RenewSubscriptionPanel(props: {
               ))}
             </div>
           </div>
+          <div className="mt-4">
+            <p className="text-xs font-medium text-[var(--muted)]">Pay with</p>
+            <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Payment token">
+              {(
+                [
+                  { id: "DESO" as const, label: "DESO" },
+                  { id: "DUSDC" as const, label: "dUSDC" },
+                ]
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={paymentToken === opt.id}
+                  disabled={paying}
+                  onClick={() => setPaymentToken(opt.id)}
+                  className={
+                    paymentToken === opt.id
+                      ? "rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--background)]"
+                      : "rounded-lg border border-[var(--card-border)] bg-[var(--background)]/30 px-3 py-1.5 text-sm hover:bg-[var(--card)] disabled:opacity-50"
+                  }
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-[var(--muted)]">
+              dUSDC is the USD-pegged wrapped-USDC DeSo Token (1 dUSDC ≈ $1).
+              Your Identity wallet must hold a balance and will prompt for a
+              token-transfer permission.
+            </p>
+          </div>
           {loading && (
             <p className="mt-2 text-sm text-[var(--muted)]">Loading quote…</p>
           )}
@@ -187,22 +230,47 @@ export function RenewSubscriptionPanel(props: {
                   <dt className="text-[var(--muted)]">USD (this payment)</dt>
                   <dd className="font-medium tabular-nums">{quote.totalUsdFormatted}</dd>
                 </div>
-                <div className="flex justify-between gap-4">
-                  <dt className="text-[var(--muted)]">DeSo / monthly</dt>
-                  <dd className="tabular-nums text-[var(--accent)]">
-                    {quote.monthlyDesoFormatted} DESO
-                  </dd>
-                </div>
-                <div className="flex justify-between gap-4">
-                  <dt className="text-[var(--muted)]">DeSo (this payment)</dt>
-                  <dd className="font-medium tabular-nums text-[var(--accent)]">
-                    {quote.desoFormatted} DESO
-                  </dd>
-                </div>
+                {paymentToken === "DESO" ? (
+                  <>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-[var(--muted)]">DeSo / monthly</dt>
+                      <dd className="tabular-nums text-[var(--accent)]">
+                        {quote.monthlyDesoFormatted} DESO
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-[var(--muted)]">DeSo (this payment)</dt>
+                      <dd className="font-medium tabular-nums text-[var(--accent)]">
+                        {quote.desoFormatted} DESO
+                      </dd>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-[var(--muted)]">dUSDC / monthly</dt>
+                      <dd className="tabular-nums text-[var(--accent)]">
+                        {quote.monthlyDusdcFormatted}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-[var(--muted)]">dUSDC (this payment)</dt>
+                      <dd className="font-medium tabular-nums text-[var(--accent)]">
+                        {quote.dusdcFormatted}
+                      </dd>
+                    </div>
+                  </>
+                )}
               </dl>
               <p className="mt-2 text-xs text-[var(--muted)]">
-                ~${quote.usdPerDeso.toFixed(4)} / DESO
-                {quote.rateSource === "env" ? " (DESO_USD_PRICE)" : " (node)"}
+                {paymentToken === "DESO" ? (
+                  <>
+                    ~${quote.usdPerDeso.toFixed(4)} / DESO
+                    {quote.rateSource === "env" ? " (DESO_USD_PRICE)" : " (node)"}
+                  </>
+                ) : (
+                  <>Fixed peg: 1 dUSDC = $1 (wrapped USDC on DeSo)</>
+                )}
               </p>
               <button
                 type="button"
@@ -210,7 +278,11 @@ export function RenewSubscriptionPanel(props: {
                 onClick={() => void handlePay()}
                 className="mt-4 w-full rounded-lg bg-[var(--accent)] py-2.5 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
               >
-                {paying ? "Processing…" : "Pay with DeSo & extend billing"}
+                {paying
+                  ? "Processing…"
+                  : paymentToken === "DUSDC"
+                    ? "Pay with dUSDC & extend billing"
+                    : "Pay with DeSo & extend billing"}
               </button>
               <button
                 type="button"

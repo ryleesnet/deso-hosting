@@ -6,9 +6,15 @@ import { requireAdmin, requireUser } from "@/lib/api-auth";
 import { sanitizeImageProfilesInput } from "@/lib/image-profiles";
 
 /**
- * Admins (logged in) see all services including inactive ones; everyone else sees the
- * active catalog. Anonymous callers (no JWT) get only active services so the catalog page
- * still works for visitors.
+ * Default response (used by the public catalog and dashboards):
+ *   - Admins see active plans plus every testing plan (the `testing` flag is
+ *     itself the admin-only visibility gate, so purely inactive non-testing
+ *     plans stay hidden even from admins).
+ *   - Everyone else sees only active, non-testing plans.
+ *
+ * Pass `?all=true` (admin-only) to get every plan regardless of state — used
+ * by the admin catalog editor so admins can still see and re-activate
+ * inactive plans.
  */
 export async function GET(req: NextRequest) {
   const hasJwt = !!req.headers.get("authorization");
@@ -19,8 +25,15 @@ export async function GET(req: NextRequest) {
     isAdmin = auth.isAdmin;
   }
 
+  const wantAll =
+    new URL(req.url).searchParams.get("all")?.toLowerCase() === "true";
   const services = await getServices();
-  const filtered = isAdmin ? services : services.filter((s) => s.active);
+  const filtered =
+    isAdmin && wantAll
+      ? services
+      : isAdmin
+        ? services.filter((s) => s.active || s.testing)
+        : services.filter((s) => s.active && !s.testing);
   const payload = await enrichServicesForPublic(filtered);
   return NextResponse.json(payload);
 }
@@ -56,6 +69,7 @@ export async function POST(req: NextRequest) {
       proxmoxTemplate: service.proxmoxTemplate,
       proxmoxNode: service.proxmoxNode,
       active: service.active !== false,
+      ...(service.testing === true ? { testing: true } : {}),
       ...(sanitizedProfiles.length > 0 ? { imageProfiles: sanitizedProfiles } : {}),
     });
 

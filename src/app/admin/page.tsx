@@ -290,7 +290,7 @@ export default function AdminPage() {
   const loadData = useCallback(() => {
     if (!user || !isAdmin) return;
     Promise.all([
-      apiFetch(`/api/services`).then((r) => r.json()),
+      apiFetch(`/api/services?all=true`).then((r) => r.json()),
       apiFetch(`/api/orders?as=all`).then((r) => r.json()),
       apiFetch(`/api/admin/public-ips`).then(
         async (r) => {
@@ -1375,7 +1375,22 @@ export default function AdminPage() {
               className="flex flex-col gap-4 rounded-2xl border border-[var(--card-border)] bg-[var(--card)] p-6 sm:flex-row sm:items-center sm:justify-between"
             >
               <div>
-                <h3 className="font-semibold">{s.name}</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="font-semibold">{s.name}</h3>
+                  {!s.active && (
+                    <span className="rounded-full border border-[var(--card-border)] bg-[var(--background)]/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+                      Inactive
+                    </span>
+                  )}
+                  {s.testing && (
+                    <span
+                      className="rounded-full border border-purple-500/40 bg-purple-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-200"
+                      title="Testing plan — hidden from the public catalog and non-admin checkout."
+                    >
+                      Testing · admins only
+                    </span>
+                  )}
+                </div>
                 <p className="text-sm text-[var(--muted)]">{s.description}</p>
                 <p className="mt-2 text-sm">
                   {s.vcpu} vCPU · {s.ram / 1024} GB Memory · {s.storage} GB

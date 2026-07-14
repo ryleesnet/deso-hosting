@@ -2,15 +2,34 @@ import { NextRequest, NextResponse } from "next/server";
 import { getService, updateService, deleteService } from "@/lib/db";
 import { publicServiceById } from "@/lib/service-pricing";
 import { normalizeRamMb } from "@/lib/service-ram";
-import { requireAdmin } from "@/lib/api-auth";
+import { requireAdmin, requireUser } from "@/lib/api-auth";
 import { sanitizeImageProfilesInput } from "@/lib/image-profiles";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   const service = await getService(id);
+  if (!service) {
+    return NextResponse.json({ error: "Service not found" }, { status: 404 });
+  }
+
+  // Testing plans are admin-only. Return 404 (not 403) to avoid leaking that
+  // an ID exists to non-admin callers who happened to guess or share a link.
+  if (service.testing) {
+    const hasJwt = !!req.headers.get("authorization");
+    let isAdmin = false;
+    if (hasJwt) {
+      const auth = await requireUser(req);
+      if (!auth.ok) return auth.response;
+      isAdmin = auth.isAdmin;
+    }
+    if (!isAdmin) {
+      return NextResponse.json({ error: "Service not found" }, { status: 404 });
+    }
+  }
+
   const enriched = await publicServiceById(service);
   if (!enriched) {
     return NextResponse.json({ error: "Service not found" }, { status: 404 });
@@ -40,6 +59,9 @@ export async function PATCH(
         );
       }
       patch.priceUsdCents = c;
+    }
+    if (patch.testing !== undefined) {
+      patch.testing = patch.testing === true;
     }
     if (patch.ram !== undefined) {
       patch.ram = normalizeRamMb(Number(patch.ram));

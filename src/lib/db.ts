@@ -46,6 +46,14 @@ export interface VPSService {
    */
   imageProfiles?: ServiceImageProfile[];
   active: boolean;
+  /**
+   * Admin-only plan flag. Testing plans are hidden from the public catalog and
+   * checkout, only appear in `/api/services` when the caller is an admin, and
+   * only admins can create orders against them (used for staging / smoke-test
+   * SKUs like a $0.01 plan). Independent of `active` so admins can also mark a
+   * testing plan inactive without changing its testing scope.
+   */
+  testing?: boolean;
   createdAt: string;
 }
 
@@ -316,12 +324,27 @@ export async function deleteOrder(id: string): Promise<void> {
 /** Processed on-chain renewal payments (idempotency: doc id = tx hash hex, lowercased). */
 export interface RenewalTxRecord {
   txHashHex: string;
-  orderId: string;
-  subscriptionId: string;
-  /** Total nanos paid in this renewal transaction. */
+  /** Legacy single-order records only — batch records use `orderIds`. */
+  orderId?: string;
+  /** Legacy single-order records only — batch records use `subscriptionIds`. */
+  subscriptionId?: string;
+  /**
+   * Total DESO-equivalent nanos paid in this renewal transaction. For non-DESO
+   * payment tokens (e.g. DUSDC) this is the current-rate equivalent so
+   * historical reporting stays in DESO-nanos units.
+   */
   amountNanos: number;
   /** Number of billing months covered (1–3). Omit on legacy records. */
   months?: number;
+  /**
+   * Token used for this on-chain payment. Omitted on legacy records (which
+   * were all DESO-native BASIC_TRANSFERs).
+   */
+  paymentToken?: "DESO" | "DUSDC";
+  /** Ordered set of order IDs covered by this single on-chain transaction (batch payments). */
+  orderIds?: string[];
+  /** Ordered set of subscription IDs covered (parallel to `orderIds`). */
+  subscriptionIds?: string[];
   processedAt: string;
 }
 
@@ -349,6 +372,8 @@ export async function commitSubscriptionRenewalWithTxRecord(params: {
   months: number;
   /** Snapshot: one month in nanos written to the subscription row. */
   subscriptionMonthlyNanos: number;
+  /** Token used to pay; omit for legacy DESO renewals. */
+  paymentToken?: "DESO" | "DUSDC";
   lastPaymentAt: string;
   nextPaymentAt: string;
 }): Promise<"applied" | "idempotent"> {
@@ -377,6 +402,7 @@ export async function commitSubscriptionRenewalWithTxRecord(params: {
       subscriptionId: params.subscriptionId,
       amountNanos: params.totalPaidNanos,
       months: params.months,
+      ...(params.paymentToken ? { paymentToken: params.paymentToken } : {}),
       processedAt: params.lastPaymentAt,
     };
     transaction.set(renewalRef, forFirestore(record));
@@ -387,6 +413,104 @@ export async function commitSubscriptionRenewalWithTxRecord(params: {
       status: "active",
       amountNanos: params.subscriptionMonthlyNanos,
     });
+
+    return "applied";
+  });
+}
+
+/**
+ * Apply one on-chain transaction to N subscriptions atomically (batch renewal).
+ *
+ * Idempotency: The `renewal_txs/{txHash}` doc is authoritative for whether the
+ * transaction has been consumed. If it exists we require its recorded
+ * `orderIds` to match the caller's request exactly — this stops a payer from
+ * paying $X to cover orders {A,B} and later trying to re-declare the same
+ * tx as also covering {C,D}.
+ */
+export async function commitBatchSubscriptionRenewalWithTxRecord(params: {
+  txHashHex: string;
+  /** Deterministically ordered set of item updates (order + subscription + snapshot nanos + new dates). */
+  items: Array<{
+    orderId: string;
+    subscriptionId: string;
+    months: number;
+    /** One-month snapshot for the subscription row. */
+    subscriptionMonthlyNanos: number;
+    /** Per-order share of the total tx amount (nanos, DESO-equivalent). */
+    perOrderPaidNanos: number;
+    nextPaymentAt: string;
+  }>;
+  /** Total DESO-equivalent nanos paid across all items. */
+  totalPaidNanos: number;
+  paymentToken?: "DESO" | "DUSDC";
+  lastPaymentAt: string;
+}): Promise<"applied" | "idempotent"> {
+  const txId = normalizeRenewalTxHashHex(params.txHashHex);
+  if (!/^[0-9a-f]{64}$/.test(txId)) {
+    throw new Error("Invalid txHash");
+  }
+  if (params.items.length === 0) {
+    throw new Error("Empty batch");
+  }
+
+  const orderIdsSorted = [...params.items]
+    .map((i) => i.orderId)
+    .sort((a, b) => a.localeCompare(b));
+
+  const renewalRef = db().collection(COL_RENEWAL_TXS).doc(txId);
+  const subRefs = params.items.map((i) => ({
+    item: i,
+    ref: db().collection(COL_SUBSCRIPTIONS).doc(i.subscriptionId),
+  }));
+
+  return db().runTransaction(async (transaction) => {
+    const renewalSnap = await transaction.get(renewalRef);
+    if (renewalSnap.exists) {
+      const d = renewalSnap.data() as RenewalTxRecord;
+      const recorded =
+        (d.orderIds && d.orderIds.length ? d.orderIds : d.orderId ? [d.orderId] : []) ?? [];
+      const recordedSorted = [...recorded].sort((a, b) => a.localeCompare(b));
+      const same =
+        recordedSorted.length === orderIdsSorted.length &&
+        recordedSorted.every((id, idx) => id === orderIdsSorted[idx]);
+      if (!same) {
+        throw new Error("TX_CONFLICT_ORDER");
+      }
+      return "idempotent";
+    }
+
+    const subSnaps = await Promise.all(
+      subRefs.map(async ({ item, ref }) => ({
+        item,
+        ref,
+        snap: await transaction.get(ref),
+      }))
+    );
+    for (const { snap } of subSnaps) {
+      if (!snap.exists) throw new Error("SUBSCRIPTION_GONE");
+    }
+
+    const record: RenewalTxRecord = {
+      txHashHex: txId,
+      amountNanos: params.totalPaidNanos,
+      months: params.items[0]?.months ?? 1,
+      orderIds: orderIdsSorted,
+      subscriptionIds: [...params.items]
+        .sort((a, b) => a.orderId.localeCompare(b.orderId))
+        .map((i) => i.subscriptionId),
+      ...(params.paymentToken ? { paymentToken: params.paymentToken } : {}),
+      processedAt: params.lastPaymentAt,
+    };
+    transaction.set(renewalRef, forFirestore(record));
+
+    for (const { item, ref } of subRefs) {
+      transaction.update(ref, {
+        lastPaymentAt: params.lastPaymentAt,
+        nextPaymentAt: item.nextPaymentAt,
+        status: "active",
+        amountNanos: item.subscriptionMonthlyNanos,
+      });
+    }
 
     return "applied";
   });

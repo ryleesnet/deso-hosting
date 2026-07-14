@@ -213,8 +213,21 @@ export async function POST(req: NextRequest) {
     if (!service) {
       return NextResponse.json({ error: "Service not found" }, { status: 404 });
     }
-    if (!service.active) {
-      return NextResponse.json({ error: "Service is not available" }, { status: 400 });
+    // Ordering rules mirror the catalog:
+    //   - non-admins can only order `active && !testing` plans (testing plans
+    //     404 to avoid leaking existence).
+    //   - admins can order `active || testing`. The `testing` flag is itself
+    //     an admin-only visibility gate, so a testing plan does NOT need to
+    //     be active — a $0.01 smoke-test SKU is typically inactive+testing.
+    if (service.testing) {
+      if (!auth.isAdmin) {
+        return NextResponse.json({ error: "Service not found" }, { status: 404 });
+      }
+    } else if (!service.active) {
+      return NextResponse.json(
+        { error: "Service is not available" },
+        { status: 400 }
+      );
     }
 
     const hosted = await readActiveOsTemplateProfiles();

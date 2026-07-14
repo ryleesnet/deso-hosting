@@ -15,6 +15,7 @@ import { OrderSpecsSummary } from "@/components/OrderSpecsSummary";
 import { BillingCycleSummary, type BillingInfo } from "@/components/BillingCycleSummary";
 import { VmBootstrapCredentials } from "@/components/VmBootstrapCredentials";
 import { RenewSubscriptionPanel } from "@/components/RenewSubscriptionPanel";
+import { BulkRenewPanel } from "@/components/BulkRenewPanel";
 import { ReinstallVpsButton } from "@/components/ReinstallVpsButton";
 import { PrivateUserLanPanel } from "@/components/PrivateUserLanPanel";
 import { ChangeVpsPlanPanel } from "@/components/ChangeVpsPlanPanel";
@@ -264,6 +265,22 @@ export default function DashboardPage() {
           </Link>
         </div>
       ) : (
+        <>
+          <BulkRenewPanel
+            orders={orders
+              .filter((o) => o.status !== "cancelled")
+              .map((o) => ({
+                orderId: o.id,
+                serviceName:
+                  services[o.serviceId]?.name ?? `Plan ${o.serviceId.slice(0, 8)}…`,
+                vmid: o.vmid,
+                status: o.status,
+                subscriptionStatus:
+                  o.billing?.subscriptionStatus ?? "unknown",
+                nextPaymentAt: o.billing?.nextPaymentAt,
+              }))}
+            onSuccess={loadData}
+          />
         <div className="mt-8 space-y-8">
           {orders
             .filter((o) => o.status !== "cancelled")
@@ -647,6 +664,7 @@ export default function DashboardPage() {
               );
             })}
         </div>
+        </>
       )}
     </div>
   );

@@ -5,7 +5,8 @@
  * Docs: https://docs.deso.org/deso-identity/window-api/basics
  */
 
-import { configure, identity, sendDeso } from "deso-protocol";
+import { configure, identity, sendDeso, transferDeSoToken } from "deso-protocol";
+import { DUSDC, usdCentsToDusdcHex } from "@/lib/deso-tokens";
 
 // Must match deso-protocol's storage key (see node_modules/deso-protocol/src/identity/constants.js)
 const IDENTITY_USERS_KEY = "desoIdentityUsers";
@@ -240,6 +241,40 @@ export async function payWithDeSo(
     SenderPublicKeyBase58Check: user.publicKey,
     RecipientPublicKeyOrUsername: recipientPublicKey,
     AmountNanos: amountNanos,
+    MinFeeRateNanosPerKB: 1000,
+    ...(memo && { ExtraData: { memo: memo } }),
+  });
+
+  return result;
+}
+
+/**
+ * Pay with dUSDC (the wrapped-USDC DeSo Token). Since dUSDC is USD-pegged, the
+ * caller supplies the price in cents and we send exactly `usdCents / 100` dUSDC.
+ *
+ * `transferDeSoToken` guards the transaction against the user's current
+ * DAOCoinOperationLimitMap and will trigger an Identity permission prompt if
+ * the current derived-key spending limit doesn't cover the transfer.
+ */
+export async function payWithDUSDC(
+  recipientPublicKey: string,
+  usdCents: number,
+  memo?: string
+) {
+  initDeSo();
+  const user = getCurrentUser();
+  if (!user) throw new Error("Not logged in");
+
+  const amountHex = usdCentsToDusdcHex(usdCents);
+  if (amountHex === "0x0") {
+    throw new Error("Payment amount must be greater than zero");
+  }
+
+  const result = await transferDeSoToken({
+    SenderPublicKeyBase58Check: user.publicKey,
+    ProfilePublicKeyBase58CheckOrUsername: DUSDC.creatorPublicKey,
+    ReceiverPublicKeyBase58CheckOrUsername: recipientPublicKey,
+    DAOCoinToTransferNanos: amountHex,
     MinFeeRateNanosPerKB: 1000,
     ...(memo && { ExtraData: { memo: memo } }),
   });

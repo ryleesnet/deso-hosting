@@ -7,8 +7,14 @@ import {
   getSubscriptionByOrder,
   normalizeRenewalTxHashHex,
 } from "@/lib/db";
-import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
-import { verifyBasicTransferPaymentToRecipient } from "@/lib/deso-tx-verify";
+import {
+  monthlyAmountNanosForOrder,
+  monthlyTotalUsdCentsForOrder,
+} from "@/lib/service-pricing";
+import {
+  verifyBasicTransferPaymentToRecipient,
+  verifyDaoCoinTransferToRecipient,
+} from "@/lib/deso-tx-verify";
 import { getDesoPaymentRecipientPublicKey } from "@/lib/payment-public-key";
 import {
   computeNextPaymentAfterRenewal,
@@ -17,6 +23,8 @@ import {
 } from "@/lib/renewal-months";
 import { resumeOrderAfterPayment } from "@/lib/order-lifecycle";
 import { requireUser } from "@/lib/api-auth";
+import { DUSDC, parsePaymentToken } from "@/lib/deso-tokens";
+import { getUsdPerDeso } from "@/lib/deso-usd-rate";
 
 function skipTxVerify(): boolean {
   const v = process.env.BILLING_SKIP_TX_VERIFY?.trim().toLowerCase();
@@ -34,6 +42,7 @@ export async function POST(req: NextRequest) {
     const txHashRaw =
       typeof body.txHash === "string" ? body.txHash.trim() : "";
     const months = parseRenewalMonths(body.months);
+    const paymentToken = parsePaymentToken(body.paymentToken);
 
     if (!orderId || !txHashRaw) {
       return NextResponse.json(
@@ -120,15 +129,38 @@ export async function POST(req: NextRequest) {
     const memoMarker = renewMemoPayload(orderId, months);
 
     if (!skipTxVerify()) {
-      const v = await verifyBasicTransferPaymentToRecipient({
-        transactionIdHexOrBase58: txHashRaw,
-        senderPublicKeyBase58: publicKey,
-        recipientPublicKeyBase58: payee,
-        minAmountNanosToRecipient: requiredNanos,
-        memoIncludesSubstring: memoMarker,
-      });
-      if (!v.ok) {
-        return NextResponse.json({ error: v.reason }, { status: 400 });
+      if (paymentToken === "DUSDC") {
+        // dUSDC is USD-pegged: 1 dUSDC = $1 = 10^18 base units, 1 cent = 10^16.
+        const rate = await getUsdPerDeso();
+        const monthlyUsdCents = monthlyTotalUsdCentsForOrder(
+          service,
+          rate.usdPerDeso,
+          order.extraDisksGb
+        );
+        const requiredCents = BigInt(monthlyUsdCents) * BigInt(months);
+        const requiredBaseUnits = requiredCents * 10n ** 16n;
+        const v = await verifyDaoCoinTransferToRecipient({
+          transactionIdHexOrBase58: txHashRaw,
+          senderPublicKeyBase58: publicKey,
+          recipientPublicKeyBase58: payee,
+          tokenCreatorPublicKeyBase58: DUSDC.creatorPublicKey,
+          minAmountBaseUnits: requiredBaseUnits,
+          memoIncludesSubstring: memoMarker,
+        });
+        if (!v.ok) {
+          return NextResponse.json({ error: v.reason }, { status: 400 });
+        }
+      } else {
+        const v = await verifyBasicTransferPaymentToRecipient({
+          transactionIdHexOrBase58: txHashRaw,
+          senderPublicKeyBase58: publicKey,
+          recipientPublicKeyBase58: payee,
+          minAmountNanosToRecipient: requiredNanos,
+          memoIncludesSubstring: memoMarker,
+        });
+        if (!v.ok) {
+          return NextResponse.json({ error: v.reason }, { status: 400 });
+        }
       }
     } else {
       console.warn(
@@ -150,6 +182,7 @@ export async function POST(req: NextRequest) {
         totalPaidNanos: requiredNanos,
         months,
         subscriptionMonthlyNanos: monthlyNanos,
+        paymentToken,
         lastPaymentAt: now,
         nextPaymentAt,
       });

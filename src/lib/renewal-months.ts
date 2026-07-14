@@ -23,6 +23,48 @@ export function renewMemoFull(orderId: string, months: number): string {
   return `DeSoHosting ${renewMemoPayload(orderId, months)}`;
 }
 
+/** Max servers renewable together in a single wallet transaction. */
+export const MAX_BATCH_RENEWAL_ORDERS = 20;
+
+export interface RenewBatchItem {
+  orderId: string;
+  months: number;
+}
+
+/**
+ * Deterministic order used both when building the memo and when applying the
+ * batch server-side. Prevents "same set, different order" mismatches when the
+ * client and server independently sort.
+ */
+export function sortRenewBatchItems(
+  items: RenewBatchItem[]
+): RenewBatchItem[] {
+  return [...items].sort((a, b) => a.orderId.localeCompare(b.orderId));
+}
+
+/**
+ * Per-order marker embedded in the batch memo. The renewal endpoint checks the
+ * memo contains this substring for every order in the request, so a payer
+ * can't accidentally over-declare which orders a single tx covers.
+ */
+export function renewBatchOrderMarker(
+  orderId: string,
+  months: number
+): string {
+  return `${orderId}:${months}m`;
+}
+
+/** Memo written to ExtraData.memo for a multi-server renewal tx (server + client must match). */
+export function renewBatchMemoPayload(items: RenewBatchItem[]): string {
+  const sorted = sortRenewBatchItems(items);
+  const body = sorted.map((i) => renewBatchOrderMarker(i.orderId, i.months)).join(",");
+  return `renew batch=${body}`;
+}
+
+export function renewBatchMemoFull(items: RenewBatchItem[]): string {
+  return `DeSoHosting ${renewBatchMemoPayload(items)}`;
+}
+
 /** Extend billing anchor by N months (calendar months, same semantics as single-month renewal). */
 export function computeNextPaymentAfterRenewal(
   currentNextPaymentAtIso: string,

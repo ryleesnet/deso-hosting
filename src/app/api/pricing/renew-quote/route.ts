@@ -9,6 +9,7 @@ import {
 } from "@/lib/pricing";
 import { parseRenewalMonths, MAX_RENEWAL_MONTHS } from "@/lib/renewal-months";
 import { requireUser } from "@/lib/api-auth";
+import { formatDusdcAmount, usdCentsToDusdcHex } from "@/lib/deso-tokens";
 
 export async function GET(req: NextRequest) {
   try {
@@ -80,6 +81,13 @@ export async function GET(req: NextRequest) {
       amountNanos,
       monthlyDesoFormatted: formatDesoFromNanos(monthlyNanos),
       desoFormatted: formatDesoFromNanos(amountNanos),
+      // dUSDC (wrapped USDC on DeSo) is USD-pegged, so no rate conversion is
+      // needed — cents map 1:1. `dusdcAmountHex` is the exact uint256 the
+      // client must pass as `DAOCoinToTransferNanos`.
+      monthlyDusdcFormatted: formatDusdcAmount(monthlyUsdCents),
+      dusdcFormatted: formatDusdcAmount(totalUsdCents),
+      dusdcAmountHex: usdCentsToDusdcHex(totalUsdCents),
+      monthlyDusdcAmountHex: usdCentsToDusdcHex(monthlyUsdCents),
       usdPerDeso: rate.usdPerDeso,
       rateSource: rate.source,
       nextPaymentAt: subscription.nextPaymentAt,

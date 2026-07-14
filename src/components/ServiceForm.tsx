@@ -20,6 +20,7 @@ export function ServiceForm({
   const [priceUsd, setPriceUsd] = useState("9.99");
   const [proxmoxNode, setProxmoxNode] = useState("");
   const [active, setActive] = useState(true);
+  const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,6 +34,7 @@ export function ServiceForm({
       setPriceUsd(((service.priceUsdCents ?? 0) / 100).toFixed(2));
       setProxmoxNode(service.proxmoxNode || "");
       setActive(service.active);
+      setTesting(service.testing === true);
     }
   }, [service]);
 
@@ -59,6 +61,7 @@ export function ServiceForm({
         priceUsdCents,
         proxmoxNode: proxmoxNode || undefined,
         active,
+        testing,
       };
 
       const res = service
@@ -194,6 +197,23 @@ export function ServiceForm({
             />
             <label htmlFor="active" className="text-sm">
               Active (visible to users)
+            </label>
+          </div>
+          <div className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              id="testing"
+              checked={testing}
+              onChange={(e) => setTesting(e.target.checked)}
+              className="mt-0.5"
+            />
+            <label htmlFor="testing" className="text-sm">
+              Testing (Visible to Admins Only)
+              <span className="mt-0.5 block text-xs text-[var(--muted)]">
+                Hidden from the public catalog and checkout. Only admins can see
+                and order this plan — useful for staging or a $0.01 smoke-test
+                SKU.
+              </span>
             </label>
           </div>
           <div className="flex gap-2 pt-4">
