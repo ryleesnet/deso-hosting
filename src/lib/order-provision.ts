@@ -36,6 +36,7 @@ import {
   profileByTemplateVmidInList,
   type ReinstallCloneBody,
 } from "@/lib/image-profiles";
+import { resolveVmDisplayName } from "@/lib/vm-name";
 
 /**
  * Resolve the Proxmox node + template VMID used to clone a guest for an order.
@@ -473,7 +474,7 @@ export async function replaceOrderVmFromTemplate(
     }
 
     const newVmid = await getNextVMID();
-    const vmName = `deso-${orderId.slice(0, 8)}`;
+    const vmName = resolveVmDisplayName(orderId, order.vmDisplayName);
     let targetNode = await pickBestProvisioningNode(provisionNode, {
       ramMb: service.ram,
       vcpu: service.vcpu,

@@ -23,6 +23,7 @@ import { updatePublicIpMachineForOrder } from "@/lib/public-ip-store";
 import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
 import { requireAdmin } from "@/lib/api-auth";
 import { effectiveTemplatesForOrder, profileByTemplateVmidInList } from "@/lib/image-profiles";
+import { resolveVmDisplayName } from "@/lib/vm-name";
 
 export async function POST(req: NextRequest) {
   try {
@@ -83,7 +84,7 @@ export async function POST(req: NextRequest) {
 
     if (templateVmid && templateNode) {
       try {
-        const vmName = `deso-${orderId.slice(0, 8)}`;
+        const vmName = resolveVmDisplayName(orderId, order.vmDisplayName);
         await cloneVM(templateNode, templateVmid, vmid, vmName, true);
         if (service) {
           if (await isPublicIpPoolConfigured() && !publicIpv4ToSave) {

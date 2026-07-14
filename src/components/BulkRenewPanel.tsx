@@ -99,6 +99,7 @@ export function BulkRenewPanel(props: {
   const [paying, setPaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [vmNames, setVmNames] = useState<Record<string, string>>({});
 
   useEffect(() => {
     // Prune stale selections when the orders list changes (e.g. after payment).
@@ -113,6 +114,42 @@ export function BulkRenewPanel(props: {
       return changed ? next : prev;
     });
   }, [eligibleOrders]);
+
+  // Lazily fetch the Proxmox display name for each eligible VM the first time
+  // the panel opens, so the list matches what the user sees on the individual
+  // dashboard cards.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const missing = eligibleOrders.filter(
+      (o) => o.vmid > 0 && vmNames[o.orderId] === undefined
+    );
+    if (missing.length === 0) return;
+    void Promise.all(
+      missing.map(async (o) => {
+        try {
+          const res = await apiFetch(`/api/vm/${o.orderId}/status`);
+          const data = (await res.json()) as { name?: unknown };
+          if (!res.ok) return { orderId: o.orderId, name: "" };
+          const raw = data.name;
+          const n = typeof raw === "string" ? raw.trim() : "";
+          return { orderId: o.orderId, name: n };
+        } catch {
+          return { orderId: o.orderId, name: "" };
+        }
+      })
+    ).then((results) => {
+      if (cancelled) return;
+      setVmNames((prev) => {
+        const next = { ...prev };
+        for (const r of results) next[r.orderId] = r.name;
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, eligibleOrders, vmNames]);
 
   const selectedIds = useMemo(
     () => eligibleOrders.filter((o) => selected[o.orderId]).map((o) => o.orderId),
@@ -327,6 +364,13 @@ export function BulkRenewPanel(props: {
                   paying ||
                   (!selected[o.orderId] &&
                     selectedIds.length >= MAX_BATCH_RENEWAL_ORDERS);
+                const cachedName = vmNames[o.orderId];
+                const vmLabel =
+                  cachedName && cachedName.length > 0
+                    ? cachedName
+                    : cachedName === undefined
+                      ? "Loading…"
+                      : `VPS - ${shortId(o.orderId)}`;
                 return (
                   <li key={o.orderId}>
                     <label
@@ -348,10 +392,10 @@ export function BulkRenewPanel(props: {
                       />
                       <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
                         <span className="truncate font-medium text-[var(--foreground)]">
-                          {o.serviceName}
+                          {vmLabel}
                         </span>
                         <span className="text-[10px] uppercase tracking-wide text-[var(--muted)]">
-                          VM {o.vmid} · {shortId(o.orderId)}
+                          {o.serviceName}
                         </span>
                         {o.subscriptionStatus === "past_due" ? (
                           <span className="rounded-full border border-orange-500/40 bg-orange-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-orange-200">
@@ -447,23 +491,32 @@ export function BulkRenewPanel(props: {
                 Batch summary ({quote.count} server{quote.count === 1 ? "" : "s"})
               </p>
               <ul className="mt-2 space-y-1 text-xs">
-                {quote.items.map((row) => (
-                  <li key={row.orderId} className="flex justify-between gap-4">
-                    <span className="min-w-0 truncate text-[var(--foreground)]">
-                      {row.serviceName}{" "}
-                      <span className="text-[var(--muted)]">
-                        · {row.months} {row.months === 1 ? "mo" : "mos"} ·{" "}
-                        {shortId(row.orderId)}
+                {quote.items.map((row) => {
+                  const cachedName = vmNames[row.orderId];
+                  const vmLabel =
+                    cachedName && cachedName.length > 0
+                      ? cachedName
+                      : cachedName === undefined
+                        ? "Loading…"
+                        : `VPS - ${shortId(row.orderId)}`;
+                  return (
+                    <li key={row.orderId} className="flex justify-between gap-4">
+                      <span className="min-w-0 truncate text-[var(--foreground)]">
+                        {vmLabel}{" "}
+                        <span className="text-[var(--muted)]">
+                          · {row.serviceName} ·{" "}
+                          {row.months} {row.months === 1 ? "mo" : "mos"}
+                        </span>
                       </span>
-                    </span>
-                    <span className="tabular-nums text-[var(--muted)]">
-                      {row.totalUsdFormatted}
-                      {paymentToken === "DESO"
-                        ? ` · ${row.desoFormatted} DESO`
-                        : ` · ${row.dusdcFormatted}`}
-                    </span>
-                  </li>
-                ))}
+                      <span className="tabular-nums text-[var(--muted)]">
+                        {row.totalUsdFormatted}
+                        {paymentToken === "DESO"
+                          ? ` · ${row.desoFormatted} DESO`
+                          : ` · ${row.dusdcFormatted}`}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
               <dl className="mt-3 space-y-1 border-t border-[var(--card-border)] pt-2 text-sm">
                 <div className="flex justify-between gap-4">

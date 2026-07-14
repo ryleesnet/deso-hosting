@@ -38,6 +38,10 @@ import {
 import { requireUser } from "@/lib/api-auth";
 import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
 import { getProxmoxHostConfig } from "@/lib/proxmox-host-config";
+import {
+  resolveVmDisplayName,
+  validateVmDisplayName,
+} from "@/lib/vm-name";
 
 /** Clone + resize + subscribe after HTTP response returns (dashboard can poll provisioning → active). */
 async function finalizeProvision(orderId: string) {
@@ -68,7 +72,7 @@ async function finalizeProvision(orderId: string) {
 
   try {
     newVmid = await getNextVMID();
-    const vmName = `deso-${orderId.slice(0, 8)}`;
+    const vmName = resolveVmDisplayName(orderId, order.vmDisplayName);
 
     targetNode = await pickBestProvisioningNode(provisionNode, {
       ramMb: service.ram,
@@ -178,6 +182,7 @@ export async function POST(req: NextRequest) {
       acceptedTermsRevision,
       imageProfileId,
       templateVmid,
+      vmDisplayName,
     } = body as {
       serviceId?: string;
       desoUsername?: string;
@@ -187,7 +192,23 @@ export async function POST(req: NextRequest) {
       acceptedTermsRevision?: unknown;
       imageProfileId?: unknown;
       templateVmid?: unknown;
+      vmDisplayName?: unknown;
     };
+
+    // Optional caller-supplied VM name — validate up-front so the eventual
+    // Proxmox clone can't fail on a bad name deep inside finalizeProvision.
+    // Empty string / undefined means "auto-generate from orderId".
+    let resolvedVmDisplayName: string | undefined;
+    if (
+      typeof vmDisplayName === "string" &&
+      vmDisplayName.trim().length > 0
+    ) {
+      const v = validateVmDisplayName(vmDisplayName);
+      if (!v.ok) {
+        return NextResponse.json({ error: v.error }, { status: 400 });
+      }
+      resolvedVmDisplayName = v.name;
+    }
 
     if (acceptedTermsRevision !== ORDER_TERMS_REVISION) {
       return NextResponse.json(
@@ -315,6 +336,10 @@ export async function POST(req: NextRequest) {
           }
         : {};
 
+    const vmNameExtras = resolvedVmDisplayName
+      ? { vmDisplayName: resolvedVmDisplayName }
+      : {};
+
     if (target) {
       const order = await addOrder({
         userId: publicKey,
@@ -326,6 +351,7 @@ export async function POST(req: NextRequest) {
         ...(normalizedExtra.length > 0 ? { extraDisksGb: normalizedExtra } : {}),
         ...orderSshFields,
         ...(Object.keys(cloneExtras).length > 0 ? cloneExtras : {}),
+        ...vmNameExtras,
       });
 
       after(() => {
@@ -356,6 +382,7 @@ export async function POST(req: NextRequest) {
       ...credentials,
       ...(normalizedExtra.length > 0 ? { extraDisksGb: normalizedExtra } : {}),
       ...orderSshFields,
+      ...vmNameExtras,
     });
 
     return NextResponse.json({

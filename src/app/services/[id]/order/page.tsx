@@ -20,6 +20,10 @@ import {
 import { apiFetch } from "@/lib/api-client";
 import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
 import { effectiveTemplatesForCheckout } from "@/lib/image-profiles";
+import {
+  VM_DISPLAY_NAME_MAX_LEN,
+  validateVmDisplayName,
+} from "@/lib/vm-name";
 
 const PAYMENT_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_DESO_PAYMENT_PUBLIC_KEY || "";
@@ -92,6 +96,18 @@ export default function OrderPage() {
   const [orderKeyCopyHint, setOrderKeyCopyHint] = useState<string | null>(null);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [paymentToken, setPaymentToken] = useState<PaymentToken>("DESO");
+  /**
+   * "random" mirrors the historical behavior (server generates
+   * `deso-<orderId prefix>`). "custom" reveals the input so the buyer can
+   * pick their own Proxmox display name.
+   */
+  const [vmNameMode, setVmNameMode] = useState<"random" | "custom">("random");
+  const [vmNameDraft, setVmNameDraft] = useState("");
+  const vmNameValidation = useMemo(() => {
+    if (vmNameMode !== "custom") return null;
+    if (!vmNameDraft.trim()) return null;
+    return validateVmDisplayName(vmNameDraft);
+  }, [vmNameMode, vmNameDraft]);
   /** Catalogue image profile ID for provisioning (ignored when plan has ≤1 implicit image). */
   const [selectedImageProfileId, setSelectedImageProfileId] = useState("");
   /** Global catalogue from `/api/os-templates` (Firestore). */
@@ -219,6 +235,21 @@ export default function OrderPage() {
       return;
     }
 
+    let vmDisplayName: string | undefined;
+    if (vmNameMode === "custom") {
+      const trimmed = vmNameDraft.trim();
+      if (!trimmed) {
+        setError("Enter a VM name, or choose Auto-generate.");
+        return;
+      }
+      const v = validateVmDisplayName(trimmed);
+      if (!v.ok) {
+        setError(v.error);
+        return;
+      }
+      vmDisplayName = v.name;
+    }
+
     const profilesCheckout = effectiveTemplatesForCheckout(service, hostedProfiles);
     if (
       profilesCheckout.length > 0 &&
@@ -273,6 +304,7 @@ export default function OrderPage() {
           txHash: txHash || undefined,
           paymentToken,
           desoUsername: user.username,
+          vmDisplayName,
           extraDisksGb: extraDisksGb.length ? extraDisksGb : undefined,
           ...(profilesCheckout.length
             ? {
@@ -577,6 +609,85 @@ export default function OrderPage() {
 
         <div className="mt-6 border-t border-[var(--card-border)] pt-4">
           <h4 className="text-sm font-semibold text-[var(--foreground)]">
+            VM name (optional)
+          </h4>
+          <p className="mt-1 text-xs text-[var(--muted)]">
+            The display name shown in Proxmox and on your dashboard. You can
+            rename it later from the VM details page.
+          </p>
+          <div className="mt-3 flex flex-col gap-2">
+            <label className="flex cursor-pointer items-start gap-2 text-sm">
+              <input
+                type="radio"
+                name="vm-name-mode"
+                className="mt-1"
+                checked={vmNameMode === "random"}
+                onChange={() => {
+                  setVmNameMode("random");
+                  setError(null);
+                }}
+              />
+              <span>
+                <span className="font-medium text-[var(--foreground)]">
+                  Auto-generate a name
+                </span>
+                <span className="block text-xs text-[var(--muted)]">
+                  We&apos;ll pick <code className="rounded bg-[var(--background)] px-1">deso-XXXXXXXX</code>{" "}
+                  based on your order ID.
+                </span>
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2 text-sm">
+              <input
+                type="radio"
+                name="vm-name-mode"
+                className="mt-1"
+                checked={vmNameMode === "custom"}
+                onChange={() => {
+                  setVmNameMode("custom");
+                  setError(null);
+                }}
+              />
+              <span>
+                <span className="font-medium text-[var(--foreground)]">
+                  Choose my own name
+                </span>
+                <span className="block text-xs text-[var(--muted)]">
+                  Letters, digits, dots, and hyphens only (max {VM_DISPLAY_NAME_MAX_LEN} characters).
+                </span>
+              </span>
+            </label>
+          </div>
+          {vmNameMode === "custom" && (
+            <div className="mt-3">
+              <label htmlFor="vm-display-name" className="sr-only">
+                VM display name
+              </label>
+              <input
+                id="vm-display-name"
+                type="text"
+                value={vmNameDraft}
+                onChange={(e) => {
+                  setVmNameDraft(e.target.value);
+                  setError(null);
+                }}
+                placeholder="my-web-server"
+                maxLength={VM_DISPLAY_NAME_MAX_LEN}
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full max-w-md rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm text-[var(--foreground)]"
+              />
+              {vmNameValidation && !vmNameValidation.ok && (
+                <p className="mt-1 text-xs text-red-400">
+                  {vmNameValidation.error}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6 border-t border-[var(--card-border)] pt-4">
+          <h4 className="text-sm font-semibold text-[var(--foreground)]">
             SSH access (optional)
           </h4>
           <p className="mt-1 text-xs text-[var(--muted)]">
@@ -750,7 +861,10 @@ export default function OrderPage() {
           disabled={
             ordering ||
             (paymentToken === "DESO" && (quoteLoading || !!quoteError)) ||
-            !acceptedTerms
+            !acceptedTerms ||
+            (vmNameMode === "custom" &&
+              vmNameValidation !== null &&
+              !vmNameValidation.ok)
           }
           className="mt-6 w-full rounded-lg bg-[var(--accent)] py-3 font-medium text-[var(--background)] transition hover:bg-[var(--accent-muted)] disabled:opacity-50"
         >

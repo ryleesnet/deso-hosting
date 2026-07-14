@@ -72,6 +72,13 @@ export interface Order {
   vmLoginUsername?: string;
   /** Plaintext initial password; restrict Firestore access in production. */
   vmLoginPassword?: string;
+  /**
+   * Optional caller-supplied Proxmox display name for the VM (validated
+   * against Proxmox's DNS-friendly naming rules at order time). When empty we
+   * fall back to `deso-<first 8 of orderId>`. Preserved across reinstalls so
+   * the guest keeps its name after a full re-clone.
+   */
+  vmDisplayName?: string;
   /** Additional data disks beyond the plan root disk, sizes in GB (Proxmox). */
   extraDisksGb?: number[];
   /**
