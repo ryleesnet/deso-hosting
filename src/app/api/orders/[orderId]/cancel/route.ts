@@ -6,8 +6,10 @@ import {
   deleteSubscription,
 } from "@/lib/db";
 import { destroyVM } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { releasePublicIpAssignmentByOrderId } from "@/lib/public-ip-store";
 import { requireUser } from "@/lib/api-auth";
+import { cancelPaypalSubscription, paypalIsConfigured } from "@/lib/paypal";
 
 export async function POST(
   req: NextRequest,
@@ -36,9 +38,31 @@ export async function POST(
       return NextResponse.json({ success: true });
     }
 
+    // Stop PayPal auto-billing FIRST, before we destroy anything — a failure
+    // to cancel the PayPal subscription would leave the buyer being charged
+    // for a VPS that no longer exists. We treat "already cancelled" errors
+    // as soft-success.
+    if (order.paypalSubscriptionId && paypalIsConfigured()) {
+      try {
+        await cancelPaypalSubscription(
+          order.paypalSubscriptionId,
+          "VPS cancelled by user"
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!/422|400|not.*active/i.test(msg)) {
+          console.error(
+            "[order cancel] PayPal subscription cancel failed:",
+            msg
+          );
+        }
+      }
+    }
+
     if (order.vmid > 0 && order.node && order.node !== "pending") {
       try {
-        await destroyVM(order.node, order.vmid);
+        const { node } = await resolveOrderVmLocation(order);
+        await destroyVM(node, order.vmid);
       } catch (err) {
         console.error("Proxmox destroy failed (VM may already be gone):", err);
       }

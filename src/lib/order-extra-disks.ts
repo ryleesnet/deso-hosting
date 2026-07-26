@@ -18,6 +18,7 @@ import {
   listManagedExtraGuestDiskVolumes,
   startVM,
 } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
 
 function approxDiskGbMatch(a: number, b: number): boolean {
@@ -101,7 +102,7 @@ export async function performExtraDiskAdd(
     );
   }
 
-  const node = order.node;
+  const { node } = await resolveOrderVmLocation(order);
   const vmid = order.vmid;
   const { wasRunning } = await haltVmForPlanMaintenance(node, vmid);
 
@@ -160,7 +161,7 @@ export async function performExtraDiskRemove(
     throw new Error("Invalid extra disk index.");
   }
 
-  const node = order.node;
+  const { node } = await resolveOrderVmLocation(order);
   const vmid = order.vmid;
   const { wasRunning } = await haltVmForPlanMaintenance(node, vmid);
 

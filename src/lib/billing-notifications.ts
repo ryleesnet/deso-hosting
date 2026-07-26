@@ -23,6 +23,7 @@ import {
 import { fetchDesoUsernameByPublicKey } from "@/lib/deso-profile";
 import { isBillingDmConfigured, sendDesoDirectMessage, getBillingDmConfigError } from "@/lib/deso-dm";
 import { getVMStatus } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 
 const NOTIFY_OFFSETS = [-5, 0, 5] as const;
 
@@ -43,7 +44,8 @@ function dashboardUrl(): string {
 async function vmDisplayLabel(order: Order): Promise<string> {
   if (order.vmid > 0 && order.node?.trim()) {
     try {
-      const status = await getVMStatus(order.node.trim(), order.vmid);
+      const { node } = await resolveOrderVmLocation(order);
+      const status = await getVMStatus(node, order.vmid);
       const name = status.name?.trim();
       if (name) return name;
     } catch (err) {

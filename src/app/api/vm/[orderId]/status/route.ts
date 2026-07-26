@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOrder } from "@/lib/db";
 import { getVMStatus } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { requireUser } from "@/lib/api-auth";
 
 export async function GET(
@@ -21,7 +22,8 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    const status = await getVMStatus(order.node, order.vmid);
+    const { node } = await resolveOrderVmLocation(order);
+    const status = await getVMStatus(node, order.vmid);
     return NextResponse.json(status);
   } catch (err) {
     console.error(err);

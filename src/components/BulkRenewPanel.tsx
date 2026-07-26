@@ -11,6 +11,10 @@ import {
 } from "@/lib/renewal-months";
 import { apiFetch } from "@/lib/api-client";
 import type { PaymentToken } from "@/lib/deso-tokens";
+import { PayPalButton } from "@/components/PayPalButton";
+
+const PAYPAL_PUBLIC_CLIENT_ID =
+  process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID?.trim() || "";
 
 export type BulkRenewOrderOption = {
   orderId: string;
@@ -19,6 +23,30 @@ export type BulkRenewOrderOption = {
   status: string;
   subscriptionStatus: string;
   nextPaymentAt?: string;
+  paymentProvider?: "deso" | "paypal";
+  paypalSubscriptionId?: string;
+};
+
+/**
+ * Per-VPS PayPal renewal state tracked in the bulk panel.
+ *
+ * PayPal Subscriptions are inherently per-plan; there's no single approval that
+ * enrols N products in one popup. So instead we render one PayPal button per
+ * selected VPS and track its enrolment status independently. Users end up doing
+ * one popup each, but they see the whole batch in one place with visible
+ * progress and can walk away when everything is green.
+ */
+type PaypalEnrollmentStatus = "idle" | "enrolling" | "enrolled" | "error";
+type PaypalRowState = {
+  monthlyUsdCents?: number;
+  monthlyUsdFormatted?: string;
+  surchargeCents?: number;
+  surchargeFormatted?: string;
+  surchargePercent?: number;
+  surchargeFixedCents?: number;
+  status: PaypalEnrollmentStatus;
+  errorMessage?: string;
+  quoteError?: string;
 };
 
 type BatchQuoteItem = {
@@ -63,9 +91,10 @@ function formatNextPaymentShort(iso?: string): string {
 
 export function BulkRenewPanel(props: {
   orders: BulkRenewOrderOption[];
+  userPublicKey: string;
   onSuccess: () => void;
 }) {
-  const { orders, onSuccess } = props;
+  const { orders, userPublicKey, onSuccess } = props;
   const payee = getDesoPaymentRecipientPublicKey();
 
   const eligibleOrders = useMemo(
@@ -100,6 +129,7 @@ export function BulkRenewPanel(props: {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [vmNames, setVmNames] = useState<Record<string, string>>({});
+  const [paypalRows, setPaypalRows] = useState<Record<string, PaypalRowState>>({});
 
   useEffect(() => {
     // Prune stale selections when the orders list changes (e.g. after payment).
@@ -186,8 +216,161 @@ export function BulkRenewPanel(props: {
 
   useEffect(() => {
     if (!open) return;
+    if (paymentToken === "PAYPAL") {
+      // The DeSo batch endpoint isn't valid for PayPal (each PayPal Subscription
+      // is a separate PayPal object with its own schedule). Per-VPS quotes are
+      // loaded by a dedicated effect below.
+      setQuote(null);
+      setLoading(false);
+      return;
+    }
     void loadQuote();
-  }, [open, loadQuote]);
+  }, [open, loadQuote, paymentToken]);
+
+  /**
+   * Fetch a 1-month renewal quote for each selected VPS while PayPal is chosen.
+   * We only need the base + surcharge, so a single-month quote is enough — PayPal
+   * charges monthly and manages the schedule itself.
+   */
+  useEffect(() => {
+    if (!open) return;
+    if (paymentToken !== "PAYPAL") return;
+    let cancelled = false;
+    const toFetch = selectedIds.filter(
+      (id) => !paypalRows[id] || paypalRows[id].monthlyUsdCents === undefined
+    );
+    if (toFetch.length === 0) return;
+    void Promise.all(
+      toFetch.map(async (orderId) => {
+        try {
+          const res = await apiFetch(
+            `/api/pricing/renew-quote?orderId=${encodeURIComponent(orderId)}&months=1`
+          );
+          const data = (await res.json()) as {
+            error?: string;
+            paypalMonthlyUsdCents?: number;
+            paypalMonthlyUsdFormatted?: string;
+            paypalMonthlySurchargeCents?: number;
+            paypalMonthlySurchargeFormatted?: string;
+            paypalSurchargePercent?: number;
+            paypalSurchargeFixedCents?: number;
+          };
+          if (!res.ok) throw new Error(data.error || "Quote failed");
+          return {
+            orderId,
+            state: {
+              monthlyUsdCents: data.paypalMonthlyUsdCents,
+              monthlyUsdFormatted: data.paypalMonthlyUsdFormatted,
+              surchargeCents: data.paypalMonthlySurchargeCents,
+              surchargeFormatted: data.paypalMonthlySurchargeFormatted,
+              surchargePercent: data.paypalSurchargePercent,
+              surchargeFixedCents: data.paypalSurchargeFixedCents,
+              status: "idle" as PaypalEnrollmentStatus,
+            } satisfies PaypalRowState,
+          };
+        } catch (e) {
+          return {
+            orderId,
+            state: {
+              status: "idle" as PaypalEnrollmentStatus,
+              quoteError:
+                e instanceof Error ? e.message : "Could not load quote",
+            } satisfies PaypalRowState,
+          };
+        }
+      })
+    ).then((results) => {
+      if (cancelled) return;
+      setPaypalRows((prev) => {
+        const next = { ...prev };
+        for (const r of results) {
+          next[r.orderId] = { ...(prev[r.orderId] ?? {}), ...r.state };
+        }
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, paymentToken, selectedIds, paypalRows]);
+
+  /**
+   * Kick off a PayPal Subscription for a single VPS. Called by that row's
+   * `PayPalButton` when the user clicks the yellow PayPal button. Returns the
+   * plan id (created/reused by our backend) so the JS SDK can open the popup.
+   */
+  const handlePaypalCreateSubscription = useCallback(
+    async (orderId: string): Promise<{ paypalPlanId: string; customId?: string }> => {
+      setPaypalRows((prev) => ({
+        ...prev,
+        [orderId]: {
+          ...(prev[orderId] ?? { status: "idle" }),
+          status: "enrolling",
+          errorMessage: undefined,
+        },
+      }));
+      const res = await apiFetch("/api/paypal/create-subscription", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent: "renew", orderId }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        paypalPlanId?: string;
+      };
+      if (!res.ok || !data.paypalPlanId) {
+        throw new Error(data.error || "Could not create PayPal plan");
+      }
+      return {
+        paypalPlanId: data.paypalPlanId,
+        customId: `deso:${userPublicKey}`,
+      };
+    },
+    [userPublicKey]
+  );
+
+  /**
+   * PayPal handed us a subscription id. Link it to the order server-side so the
+   * webhook (`PAYMENT.SALE.COMPLETED`) can extend billing on the next charge.
+   */
+  const handlePaypalApprove = useCallback(
+    async (orderId: string, paypalSubscriptionId: string) => {
+      try {
+        const res = await apiFetch("/api/paypal/renew-subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId, paypalSubscriptionId }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "PayPal renewal setup failed");
+        }
+        setPaypalRows((prev) => ({
+          ...prev,
+          [orderId]: {
+            ...(prev[orderId] ?? { status: "idle" }),
+            status: "enrolled",
+            errorMessage: undefined,
+          },
+        }));
+        // Refresh the dashboard so the row visibly moves to
+        // `paymentProvider === "paypal"` (and drops from any "past_due" state
+        // as soon as PayPal fires the first sale).
+        onSuccess();
+      } catch (e) {
+        setPaypalRows((prev) => ({
+          ...prev,
+          [orderId]: {
+            ...(prev[orderId] ?? { status: "idle" }),
+            status: "error",
+            errorMessage:
+              e instanceof Error ? e.message : "PayPal renewal setup failed",
+          },
+        }));
+      }
+    },
+    [onSuccess]
+  );
 
   const toggleAll = (checked: boolean) => {
     if (checked) {
@@ -284,9 +467,13 @@ export function BulkRenewPanel(props: {
     }
   }
 
-  if (!payee || eligibleOrders.length < 2) {
+  if (eligibleOrders.length < 2) {
     // Nothing to bulk-pay if only one server is renewable — the per-VM panel
     // already covers that flow.
+    return null;
+  }
+  if (!payee && !PAYPAL_PUBLIC_CLIENT_ID) {
+    // Neither DeSo/dUSDC nor PayPal is configured; nothing this panel can do.
     return null;
   }
 
@@ -434,7 +621,7 @@ export function BulkRenewPanel(props: {
                   <button
                     key={m}
                     type="button"
-                    disabled={paying}
+                    disabled={paying || paymentToken === "PAYPAL"}
                     onClick={() => setMonths(m)}
                     className={
                       months === m
@@ -446,6 +633,11 @@ export function BulkRenewPanel(props: {
                   </button>
                 ))}
               </div>
+              {paymentToken === "PAYPAL" ? (
+                <p className="mt-1 text-xs text-[var(--muted)]">
+                  Ignored for PayPal — auto-renewal charges monthly.
+                </p>
+              ) : null}
             </div>
             <div>
               <p className="text-xs font-medium text-[var(--muted)]">Pay with</p>
@@ -458,6 +650,9 @@ export function BulkRenewPanel(props: {
                   [
                     { id: "DESO" as const, label: "DESO" },
                     { id: "DUSDC" as const, label: "dUSDC" },
+                    ...(PAYPAL_PUBLIC_CLIENT_ID
+                      ? [{ id: "PAYPAL" as const, label: "PayPal auto-renew" }]
+                      : []),
                   ]
                 ).map((opt) => (
                   <button
@@ -466,7 +661,13 @@ export function BulkRenewPanel(props: {
                     role="radio"
                     aria-checked={paymentToken === opt.id}
                     disabled={paying}
-                    onClick={() => setPaymentToken(opt.id)}
+                    onClick={() => {
+                      setPaymentToken(opt.id);
+                      // PayPal manages the schedule itself; the "months" control
+                      // only applies to DeSo/dUSDC prepay. Snap back to 1 so the
+                      // per-VPS PayPal quotes stay coherent.
+                      if (opt.id === "PAYPAL") setMonths(1);
+                    }}
                     className={
                       paymentToken === opt.id
                         ? "rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[var(--background)]"
@@ -477,6 +678,13 @@ export function BulkRenewPanel(props: {
                   </button>
                 ))}
               </div>
+              {paymentToken === "PAYPAL" ? (
+                <p className="mt-1 text-xs text-[var(--muted)]">
+                  PayPal charges each VPS monthly (base + PayPal fee). Multi-month prepay
+                  isn&rsquo;t available for PayPal — PayPal handles the schedule. Each
+                  server needs its own PayPal approval (one popup per server).
+                </p>
+              ) : null}
             </div>
           </div>
 
@@ -485,7 +693,139 @@ export function BulkRenewPanel(props: {
           ) : null}
           {error ? <p className="text-sm text-red-400">{error}</p> : null}
 
-          {quote && !loading ? (
+          {paymentToken === "PAYPAL" && someSelected ? (
+            <div className="rounded-xl border border-[var(--card-border)] bg-[var(--background)]/40 p-3">
+              <p className="text-xs font-medium text-[var(--muted)]">
+                PayPal auto-renew per server ({selectedIds.length} selected)
+              </p>
+              <ul className="mt-3 space-y-3">
+                {selectedIds.map((orderId) => {
+                  const order = eligibleOrders.find((o) => o.orderId === orderId);
+                  if (!order) return null;
+                  const cachedName = vmNames[orderId];
+                  const vmLabel =
+                    cachedName && cachedName.length > 0
+                      ? cachedName
+                      : cachedName === undefined
+                        ? "Loading…"
+                        : `VPS - ${shortId(orderId)}`;
+                  const row = paypalRows[orderId] ?? { status: "idle" as PaypalEnrollmentStatus };
+                  const alreadyOnPaypal =
+                    order.paymentProvider === "paypal" && !!order.paypalSubscriptionId;
+                  return (
+                    <li
+                      key={orderId}
+                      className="rounded-lg border border-[var(--card-border)] bg-[var(--card)]/25 p-3"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-[var(--foreground)]">
+                            {vmLabel}
+                          </p>
+                          <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+                            {order.serviceName}
+                            {alreadyOnPaypal ? (
+                              <span className="ml-2 rounded-full border border-blue-500/40 bg-blue-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-blue-100">
+                                Already on PayPal
+                              </span>
+                            ) : null}
+                          </p>
+                          {row.quoteError ? (
+                            <p className="mt-1 text-[11px] text-red-400">
+                              {row.quoteError}
+                            </p>
+                          ) : row.monthlyUsdFormatted ? (
+                            <p className="mt-1 text-[11px] text-[var(--muted)]">
+                              Monthly:{" "}
+                              <span className="tabular-nums text-[var(--foreground)]">
+                                {row.monthlyUsdFormatted}
+                              </span>
+                              {row.surchargeCents && row.surchargeCents > 0 ? (
+                                <>
+                                  {" · fee "}
+                                  <span className="tabular-nums">
+                                    +{row.surchargeFormatted}
+                                  </span>
+                                  {typeof row.surchargePercent === "number" ? (
+                                    <>
+                                      {" ("}
+                                      {row.surchargePercent}%
+                                      {row.surchargeFixedCents && row.surchargeFixedCents > 0
+                                        ? ` + $${(row.surchargeFixedCents / 100).toFixed(2)}`
+                                        : ""}
+                                      {")"}
+                                    </>
+                                  ) : null}
+                                </>
+                              ) : null}
+                            </p>
+                          ) : (
+                            <p className="mt-1 text-[11px] text-[var(--muted)]">
+                              Loading price…
+                            </p>
+                          )}
+                        </div>
+                        <div className="min-w-[220px] shrink-0">
+                          {row.status === "enrolled" ? (
+                            <p className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-center text-xs font-medium text-emerald-200">
+                              Enrolled ✓
+                            </p>
+                          ) : (
+                            <PayPalButton
+                              clientId={PAYPAL_PUBLIC_CLIENT_ID}
+                              onCreateSubscription={() =>
+                                handlePaypalCreateSubscription(orderId)
+                              }
+                              onApprove={(paypalSubscriptionId) =>
+                                handlePaypalApprove(orderId, paypalSubscriptionId)
+                              }
+                              onCancel={() => {
+                                setPaypalRows((prev) => ({
+                                  ...prev,
+                                  [orderId]: {
+                                    ...(prev[orderId] ?? { status: "idle" }),
+                                    status: "idle",
+                                    errorMessage: undefined,
+                                  },
+                                }));
+                              }}
+                              onError={(e) => {
+                                setPaypalRows((prev) => ({
+                                  ...prev,
+                                  [orderId]: {
+                                    ...(prev[orderId] ?? { status: "idle" }),
+                                    status: "error",
+                                    errorMessage:
+                                      e instanceof Error
+                                        ? e.message
+                                        : "PayPal reported an error. Please try again.",
+                                  },
+                                }));
+                              }}
+                              refreshKey={`bulk-renew-${orderId}`}
+                            />
+                          )}
+                          {row.status === "error" && row.errorMessage ? (
+                            <p className="mt-1 text-[11px] text-red-400">
+                              {row.errorMessage}
+                            </p>
+                          ) : null}
+                          {alreadyOnPaypal && row.status !== "enrolled" ? (
+                            <p className="mt-1 text-[10px] text-[var(--muted)]">
+                              Approving replaces the existing PayPal subscription
+                              on this VPS.
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : null}
+
+          {paymentToken !== "PAYPAL" && quote && !loading ? (
             <div className="rounded-xl border border-[var(--card-border)] bg-[var(--background)]/40 p-3">
               <p className="text-xs font-medium text-[var(--muted)]">
                 Batch summary ({quote.count} server{quote.count === 1 ? "" : "s"})
@@ -546,32 +886,34 @@ export function BulkRenewPanel(props: {
             </div>
           ) : null}
 
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={paying || !someSelected || overCap || !!error && !quote}
-              onClick={() => void handlePay()}
-              className="flex-1 rounded-lg bg-[var(--accent)] py-2.5 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
-            >
-              {paying
-                ? "Processing…"
-                : paymentToken === "DUSDC"
-                  ? `Pay for ${selectedIds.length || 0} server${
-                      selectedIds.length === 1 ? "" : "s"
-                    } with dUSDC`
-                  : `Pay for ${selectedIds.length || 0} server${
-                      selectedIds.length === 1 ? "" : "s"
-                    } with DESO`}
-            </button>
-            <button
-              type="button"
-              className="rounded-lg border border-[var(--card-border)] px-3 py-2 text-xs text-[var(--muted)] hover:bg-[var(--background)] disabled:opacity-50"
-              onClick={() => void loadQuote()}
-              disabled={loading || paying || !someSelected}
-            >
-              Refresh quote
-            </button>
-          </div>
+          {paymentToken !== "PAYPAL" ? (
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={paying || !someSelected || overCap || !!error && !quote}
+                onClick={() => void handlePay()}
+                className="flex-1 rounded-lg bg-[var(--accent)] py-2.5 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
+              >
+                {paying
+                  ? "Processing…"
+                  : paymentToken === "DUSDC"
+                    ? `Pay for ${selectedIds.length || 0} server${
+                        selectedIds.length === 1 ? "" : "s"
+                      } with dUSDC`
+                    : `Pay for ${selectedIds.length || 0} server${
+                        selectedIds.length === 1 ? "" : "s"
+                      } with DESO`}
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-[var(--card-border)] px-3 py-2 text-xs text-[var(--muted)] hover:bg-[var(--background)] disabled:opacity-50"
+                onClick={() => void loadQuote()}
+                disabled={loading || paying || !someSelected}
+              >
+                Refresh quote
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
     </section>

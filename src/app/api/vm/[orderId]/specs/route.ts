@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOrder, getService } from "@/lib/db";
 import { getVMParsedSpecs } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { requireUser } from "@/lib/api-auth";
 
 export async function GET(
@@ -35,7 +36,8 @@ export async function GET(
     }
 
     try {
-      const parsed = await getVMParsedSpecs(order.node, order.vmid);
+      const { node } = await resolveOrderVmLocation(order);
+      const parsed = await getVMParsedSpecs(node, order.vmid);
       const disksGb =
         parsed.disksGb.length > 0 ? parsed.disksGb : planFallback.disksGb;
       const memoryMb =

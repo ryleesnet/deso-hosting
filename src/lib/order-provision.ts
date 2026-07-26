@@ -22,6 +22,7 @@ import {
   startVM,
   stopVM,
 } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { getProxmoxHostConfig } from "@/lib/proxmox-host-config";
 import {
   cloudInitNetworkForIp,
@@ -165,9 +166,10 @@ async function applyHardwareToProvisionedVm(
   service: VPSService
 ): Promise<void> {
   const hardwareOpts = await buildApplyHardwareOptionsFromOrder(order);
+  const { node } = await resolveOrderVmLocation(order);
 
   await applyServiceHardwareToVM(
-    order.node,
+    node,
     order.vmid,
     {
       vcpu: service.vcpu,
@@ -202,7 +204,7 @@ export async function performVpsPlanChange(
   if (!order.vmid || order.vmid <= 0 || !order.node?.trim()) {
     throw new Error("No provisioned VM to resize");
   }
-  const node = order.node;
+  const { node } = await resolveOrderVmLocation(order);
 
   const targetService = await getService(targetServiceId);
   if (!targetService?.active) {
@@ -343,7 +345,12 @@ export async function configureProvisionedVM(orderId: string): Promise<void> {
   });
 
   if (order.publicIpv4) {
-    await updatePublicIpMachineForOrder(orderId, order.vmid, order.node);
+    // Read the (possibly migration-corrected) node back out — applyHardwareToProvisionedVm
+    // resolves via cluster lookup and Firestore-heals `orders.node`, so re-reading here
+    // guarantees `public_ips` stays consistent with wherever the VM actually lives now.
+    const fresh = await getOrder(orderId);
+    const currentNode = fresh?.node?.trim() || order.node;
+    await updatePublicIpMachineForOrder(orderId, order.vmid, currentNode);
   }
 
   const existing = await getSubscriptionByOrder(orderId);
@@ -354,6 +361,16 @@ export async function configureProvisionedVM(orderId: string): Promise<void> {
       service,
       order.extraDisksGb
     );
+    // Carry over PayPal metadata (if any) so the subscription row also knows
+    // it's PayPal-billed. Advantage: the dunning cron and admin UI can render
+    // a "PayPal" pill directly from the subscription without joining Order.
+    const paypalFields =
+      order.paymentProvider === "paypal" && order.paypalSubscriptionId
+        ? {
+            paymentProvider: "paypal" as const,
+            paypalSubscriptionId: order.paypalSubscriptionId,
+          }
+        : {};
     await addSubscription({
       orderId,
       userId: order.userId,
@@ -361,6 +378,7 @@ export async function configureProvisionedVM(orderId: string): Promise<void> {
       nextPaymentAt: nextPayment.toISOString(),
       amountNanos,
       status: "active",
+      ...paypalFields,
     });
   }
 }
@@ -458,7 +476,10 @@ export async function replaceOrderVmFromTemplate(
     profileByTemplateVmidInList(profiles, target.templateVmid)?.id;
 
   const previousStatus = order.status;
-  const oldNode = order.node;
+  // The current VM may live on a different node than `order.node` if it was
+  // migrated in Proxmox. Resolve before stop/destroy so we don't send those
+  // commands to an empty host (which would 404 and abort the reinstall).
+  const { node: oldNode } = await resolveOrderVmLocation(order);
   const provisionNode = target.node;
   const provisionTemplateVmid = target.templateVmid;
 

@@ -10,6 +10,10 @@ import {
 import { parseRenewalMonths, MAX_RENEWAL_MONTHS } from "@/lib/renewal-months";
 import { requireUser } from "@/lib/api-auth";
 import { formatDusdcAmount, usdCentsToDusdcHex } from "@/lib/deso-tokens";
+import {
+  paypalSurchargeCents,
+  paypalSurchargeConfig,
+} from "@/lib/paypal-surcharge";
 
 export async function GET(req: NextRequest) {
   try {
@@ -68,6 +72,13 @@ export async function GET(req: NextRequest) {
     const totalUsdCents = monthlyUsdCents * months;
     const amountNanos = monthlyNanos * months;
 
+    const surchargeCfg = paypalSurchargeConfig();
+    const paypalMonthlySurchargeCents = paypalSurchargeCents(
+      monthlyUsdCents,
+      surchargeCfg
+    );
+    const paypalMonthlyUsdCents = monthlyUsdCents + paypalMonthlySurchargeCents;
+
     return NextResponse.json({
       orderId,
       serviceName: service.name,
@@ -92,6 +103,17 @@ export async function GET(req: NextRequest) {
       rateSource: rate.source,
       nextPaymentAt: subscription.nextPaymentAt,
       subscriptionStatus: subscription.status,
+      // PayPal renewal quote: PayPal auto-charges monthly, so we always quote
+      // "1 month + surcharge" regardless of the `months` selector (PayPal
+      // subscriptions don't take multi-month lump-sum payments).
+      paypalMonthlySurchargeCents,
+      paypalMonthlySurchargeFormatted: formatUsdCents(
+        paypalMonthlySurchargeCents
+      ),
+      paypalMonthlyUsdCents,
+      paypalMonthlyUsdFormatted: formatUsdCents(paypalMonthlyUsdCents),
+      paypalSurchargePercent: surchargeCfg.percent,
+      paypalSurchargeFixedCents: surchargeCfg.fixedCents,
     });
   } catch (err) {
     const message =

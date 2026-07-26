@@ -5,6 +5,10 @@ import {
   formatUsdCents,
   usdCentsToNanos,
 } from "@/lib/pricing";
+import {
+  paypalSurchargeCents,
+  paypalSurchargeConfig,
+} from "@/lib/paypal-surcharge";
 
 export async function GET(req: NextRequest) {
   try {
@@ -20,6 +24,9 @@ export async function GET(req: NextRequest) {
 
     const { usdPerDeso, source } = await getUsdPerDeso();
     const amountNanos = usdCentsToNanos(usdCents, usdPerDeso);
+    const surchargeCfg = paypalSurchargeConfig();
+    const paypalSurcharge = paypalSurchargeCents(usdCents, surchargeCfg);
+    const paypalUsdCents = usdCents + paypalSurcharge;
 
     return NextResponse.json({
       usdCents,
@@ -29,6 +36,14 @@ export async function GET(req: NextRequest) {
       desoAmount: amountNanos / 1e9,
       usdPerDeso,
       rateSource: source,
+      // PayPal fields (present even when PayPal is not configured — the UI just
+      // hides the button; these keep the checkout math consistent regardless).
+      paypalSurchargeCents: paypalSurcharge,
+      paypalSurchargeFormatted: formatUsdCents(paypalSurcharge),
+      paypalUsdCents,
+      paypalUsdFormatted: formatUsdCents(paypalUsdCents),
+      paypalSurchargePercent: surchargeCfg.percent,
+      paypalSurchargeFixedCents: surchargeCfg.fixedCents,
     });
   } catch (err) {
     const message =

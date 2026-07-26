@@ -4,6 +4,7 @@ import { getFirestoreDb } from "@/lib/firebase-admin";
 import { getOrder } from "@/lib/db";
 import { requireUser } from "@/lib/api-auth";
 import { removePrivateLanFromVM } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import {
   allocatePrivateLanIpv4ForOrder,
   getOrCreatePrivateVlanForUser,
@@ -62,7 +63,8 @@ export async function POST(
     }
 
     if (!enabled) {
-      await removePrivateLanFromVM(order.node, order.vmid);
+      const { node } = await resolveOrderVmLocation(order);
+      await removePrivateLanFromVM(node, order.vmid);
       await getFirestoreDb().collection(ORDERS).doc(orderId).update({
         privateLanEnabled: false,
         privateLanIp: FieldValue.delete(),

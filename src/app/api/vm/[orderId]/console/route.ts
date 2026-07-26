@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOrder } from "@/lib/db";
 import { getVMStatus, getVNCProxy } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { createConsoleToken } from "@/lib/console-tokens.js";
 import { requireUser } from "@/lib/api-auth";
 
@@ -31,7 +32,9 @@ export async function POST(
       );
     }
 
-    const vmStatus = await getVMStatus(order.node, order.vmid);
+    const { node } = await resolveOrderVmLocation(order);
+
+    const vmStatus = await getVMStatus(node, order.vmid);
     if (vmStatus.status !== "running") {
       return NextResponse.json(
         { error: "VM must be running to access console. Start the VM first." },
@@ -50,11 +53,11 @@ export async function POST(
       );
     }
 
-    const proxy = await getVNCProxy(order.node, order.vmid);
+    const proxy = await getVNCProxy(node, order.vmid);
     const token = createConsoleToken(
       proxy.ticket,
       proxy.port,
-      order.node,
+      node,
       order.vmid
     );
 

@@ -1236,6 +1236,61 @@ export async function getClusterResources(): Promise<
     }));
 }
 
+/**
+ * Given a VMID, return the Proxmox node that currently hosts it.
+ *
+ * Fast path: probe the caller's hint (Firestore-cached `orders.node`). If PVE
+ * answers `status/current`, the VM still lives there.
+ *
+ * Slow path: cluster-wide lookup via `/cluster/resources?type=vm`. Used when
+ * the hint returns 404/500 — i.e. after a manual migration or a fresh cluster
+ * rebalance. Returns `null` when the VMID doesn't exist on any node.
+ *
+ * `moved` is true when the answer differs from the hint (caller should
+ * persist the new node so subsequent calls skip the slow path).
+ */
+export async function resolveCurrentNodeForVmid(
+  vmid: number,
+  nodeHint?: string | null
+): Promise<{ node: string; moved: boolean } | null> {
+  if (!Number.isFinite(vmid) || vmid <= 0) return null;
+  const hint = typeof nodeHint === "string" ? nodeHint.trim() : "";
+
+  if (hint && hint !== "pending") {
+    try {
+      const client = await getProxmoxClient();
+      await client.get(`/nodes/${hint}/qemu/${vmid}/status/current`);
+      return { node: hint, moved: false };
+    } catch (e) {
+      const status = (e as { response?: { status?: number } })?.response?.status;
+      // 404 = wrong node (migrated away); 500 = "config file doesn't exist"
+      // (same underlying cause on some PVE versions). Anything else is a real
+      // error — fall through to cluster lookup either way, since misclassifying
+      // an outage as "not here" costs one extra API call.
+      if (status !== 404 && status !== 500 && status !== 400) {
+        console.warn(
+          "[Proxmox] hinted-node probe failed unexpectedly; falling back to cluster lookup",
+          { vmid, hint, status, error: e instanceof Error ? e.message : e }
+        );
+      }
+    }
+  }
+
+  const client = await getProxmoxClient();
+  const { data } = await client.get("/cluster/resources?type=vm");
+  const rows: Array<{ type?: string; vmid?: number; node?: string }> = Array.isArray(data?.data)
+    ? data.data
+    : [];
+  const found = rows.find(
+    (r) => (r.type === "qemu" || r.type === "lxc") && r.vmid === vmid
+  );
+  if (!found || typeof found.node !== "string" || !found.node.trim()) {
+    return null;
+  }
+  const currentNode = found.node.trim();
+  return { node: currentNode, moved: hint !== currentNode };
+}
+
 /** Per-hypervisor capacity from `/cluster/resources?type=node` (CPU + RAM). */
 export interface ClusterNodeResources {
   node: string;

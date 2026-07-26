@@ -16,6 +16,7 @@ import {
   updateSubscription,
 } from "@/lib/db";
 import { getVMStatus, shutdownVM, startVM } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 
 /** Days after `nextPaymentAt` before an active VPS is auto-suspended (order status + guest shutdown). */
 export function suspendAfterPastDueDays(): number {
@@ -96,7 +97,8 @@ export async function suspendOrderById(orderId: string): Promise<void> {
     throw new Error("Only active orders can be suspended");
   }
   if (order.node?.trim() && order.vmid && order.vmid > 0) {
-    await shutdownGuestForSuspension(order.node, order.vmid);
+    const { node } = await resolveOrderVmLocation(order);
+    await shutdownGuestForSuspension(node, order.vmid);
   }
   await updateOrder(orderId, { status: "suspended" });
 }
@@ -144,7 +146,8 @@ export async function resumeOrderAfterPayment(orderId: string): Promise<void> {
 
   if (order.node?.trim() && order.vmid && order.vmid > 0) {
     try {
-      await startVM(order.node, order.vmid);
+      const { node } = await resolveOrderVmLocation(order);
+      await startVM(node, order.vmid);
     } catch (e) {
       console.error("[resumeOrderAfterPayment] startVM", orderId, e);
     }

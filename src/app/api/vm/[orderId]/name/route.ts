@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOrder } from "@/lib/db";
 import { setVMDisplayName, formatProxmoxApiError } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { requireUser } from "@/lib/api-auth";
 
 export async function POST(
@@ -51,7 +52,8 @@ export async function POST(
       );
     }
 
-    await setVMDisplayName(order.node, order.vmid, trimmed);
+    const { node } = await resolveOrderVmLocation(order);
+    await setVMDisplayName(node, order.vmid, trimmed);
     return NextResponse.json({ success: true, name: trimmed });
   } catch (err) {
     console.error("[vm/name]", err);

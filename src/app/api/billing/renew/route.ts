@@ -51,6 +51,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (paymentToken === "PAYPAL") {
+      // This route only verifies on-chain DeSo/dUSDC transfers. PayPal
+      // renewals go through /api/paypal/renew-subscribe and the webhook.
+      return NextResponse.json(
+        {
+          error:
+            "PayPal renewals are handled through the PayPal endpoints, not this route.",
+        },
+        { status: 400 }
+      );
+    }
+
     const normalizedHash = normalizeRenewalTxHashHex(txHashRaw);
     if (!/^[0-9a-f]{64}$/.test(normalizedHash)) {
       return NextResponse.json(

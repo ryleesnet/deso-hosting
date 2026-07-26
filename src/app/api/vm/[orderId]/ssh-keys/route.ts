@@ -4,6 +4,7 @@ import {
   applyCloudInitSshKeysAndRegenerate,
   formatProxmoxApiError,
 } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import {
   generateEd25519SshKeypairForVm,
   normalizeAndValidateSshPublicKeysInput,
@@ -92,9 +93,11 @@ export async function POST(
       }
     }
 
+    const { node } = await resolveOrderVmLocation(order);
+
     try {
       await applyCloudInitSshKeysAndRegenerate(
-        order.node,
+        node,
         order.vmid,
         nextSshKeys || null
       );

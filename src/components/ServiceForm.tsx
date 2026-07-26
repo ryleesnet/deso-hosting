@@ -161,7 +161,8 @@ export function ServiceForm({
               placeholder="9.99"
             />
             <p className="mt-1 text-xs text-[var(--muted)]">
-              Customers pay this amount in USD value, charged in DeSo at checkout.
+              Customers pay this amount in USD value. Charged in DeSo (at the live
+              rate), dUSDC (1:1 USD), or PayPal at checkout.
             </p>
           </div>
           <div>

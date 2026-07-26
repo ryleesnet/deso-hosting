@@ -54,6 +54,8 @@ interface Order {
   privateLanEnabled?: boolean;
   privateLanVlan?: number;
   privateLanIp?: string;
+  paymentProvider?: "deso" | "paypal";
+  paypalSubscriptionId?: string;
 }
 
 interface Service {
@@ -278,7 +280,10 @@ export default function DashboardPage() {
                 subscriptionStatus:
                   o.billing?.subscriptionStatus ?? "unknown",
                 nextPaymentAt: o.billing?.nextPaymentAt,
+                paymentProvider: o.paymentProvider,
+                paypalSubscriptionId: o.paypalSubscriptionId,
               }))}
+            userPublicKey={user.publicKey}
             onSuccess={loadData}
           />
         <div className="mt-8 space-y-8">

@@ -5,6 +5,7 @@ import {
   restoreVmFromBackup,
   formatProxmoxApiError,
 } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { resolveProxmoxBackupStoragePool } from "@/lib/proxmox-host-config";
 import { provisionErrorMessage } from "@/lib/order-provision";
 import { requireUser } from "@/lib/api-auth";
@@ -89,7 +90,8 @@ export async function POST(
     }
 
     const storagePool = await resolveProxmoxBackupStoragePool();
-    const backups = await listVmBackups(order.node, order.vmid, storagePool);
+    const { node: liveNode } = await resolveOrderVmLocation(order);
+    const backups = await listVmBackups(liveNode, order.vmid, storagePool);
     const match = backups.find((b) => b.volid === volid);
     if (!match) {
       return NextResponse.json(
@@ -104,7 +106,7 @@ export async function POST(
       provisionError: "",
     });
 
-    const node = order.node;
+    const node = liveNode;
     const vmid = order.vmid;
     const archive = volid;
     const oid = orderId;

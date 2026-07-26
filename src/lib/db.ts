@@ -4,6 +4,7 @@
  */
 
 import { getFirestoreDb } from "@/lib/firebase-admin";
+import type { PaymentToken } from "@/lib/deso-tokens";
 
 const COL_SERVICES = "services";
 const COL_ORDERS = "orders";
@@ -12,6 +13,10 @@ const COL_RENEWAL_TXS = "renewal_txs";
 const COL_BILLING_DM_NOTIFICATIONS = "billing_dm_notifications";
 /** Global QEMU templates (label → Proxmox template VMID) shown at checkout and reinstall. */
 const COL_OS_TEMPLATES = "os_templates";
+/** Cached PayPal Product + Plan objects created for each `services/{id}` snapshot (see src/lib/paypal.ts). */
+const COL_PAYPAL_PLANS = "paypal_plans";
+/** Idempotency store for inbound PayPal webhook events, doc id = PayPal `event.id`. */
+const COL_PAYPAL_EVENTS = "paypal_events";
 
 const OS_TEMPLATE_ID_RE = /^[a-z][a-z0-9_-]{0,62}$/i;
 const MAX_HOSTED_OS_TEMPLATES = 100;
@@ -122,6 +127,25 @@ export interface Order {
   hardwareMaintenance?: boolean;
   /** Set while a vzdump backup restore runs (stop → restore → start). */
   backupRestoreInProgress?: boolean;
+  /**
+   * Payment rail used to place this order. Absent on legacy DESO-only orders.
+   * "paypal" means recurring billing is handled off-chain by PayPal (see
+   * `paypalSubscriptionId`); everything else uses DeSo Identity transfers.
+   */
+  paymentProvider?: "deso" | "paypal";
+  /**
+   * PayPal Billing Agreement (Subscriptions v1) id for this order — present
+   * when `paymentProvider === "paypal"`. We use it to (a) verify the initial
+   * approval, (b) cancel/refund on VPS cancel, and (c) look up the current
+   * `next_billing_time` when a `PAYMENT.SALE.COMPLETED` webhook arrives.
+   */
+  paypalSubscriptionId?: string;
+  /** PayPal Plan id snapshot at order time (so we know what price + surcharge was captured). */
+  paypalPlanId?: string;
+  /** Payer email PayPal returned at approval — kept for support/refunds. */
+  paypalPayerEmail?: string;
+  /** Total USD cents PayPal is billing (base plan + surcharge); snapshot for admin display. */
+  paypalMonthlyUsdCents?: number;
 }
 
 export interface Subscription {
@@ -132,6 +156,10 @@ export interface Subscription {
   nextPaymentAt: string;
   amountNanos: number;
   status: "active" | "past_due" | "cancelled";
+  /** Payment rail: "deso" (default) or "paypal". Absent = legacy DESO-only records. */
+  paymentProvider?: "deso" | "paypal";
+  /** PayPal Subscription id if this is billed through PayPal (mirrors `Order.paypalSubscriptionId`). */
+  paypalSubscriptionId?: string;
 }
 
 function db() {
@@ -328,8 +356,12 @@ export async function deleteOrder(id: string): Promise<void> {
   await db().collection(COL_ORDERS).doc(id).delete();
 }
 
-/** Processed on-chain renewal payments (idempotency: doc id = tx hash hex, lowercased). */
+/** Processed renewal payments (idempotency store; doc id = tx hash hex OR `paypal_<sale.id>`). */
 export interface RenewalTxRecord {
+  /**
+   * For DESO/DUSDC: 64-char lower-case hex of the on-chain tx hash.
+   * For PAYPAL:      `paypal_<PayPal sale/capture id>` (any string; not hex).
+   */
   txHashHex: string;
   /** Legacy single-order records only — batch records use `orderIds`. */
   orderId?: string;
@@ -337,33 +369,49 @@ export interface RenewalTxRecord {
   subscriptionId?: string;
   /**
    * Total DESO-equivalent nanos paid in this renewal transaction. For non-DESO
-   * payment tokens (e.g. DUSDC) this is the current-rate equivalent so
-   * historical reporting stays in DESO-nanos units.
+   * payment tokens (dUSDC, PayPal) this is the current-rate equivalent so
+   * historical reporting stays in DESO-nanos units. For PayPal it may be `0`
+   * when a rate is not readily available at webhook processing time.
    */
   amountNanos: number;
   /** Number of billing months covered (1–3). Omit on legacy records. */
   months?: number;
   /**
-   * Token used for this on-chain payment. Omitted on legacy records (which
-   * were all DESO-native BASIC_TRANSFERs).
+   * Payment token/rail used to pay this renewal. Omitted on legacy records
+   * (which were all DESO-native BASIC_TRANSFERs).
    */
-  paymentToken?: "DESO" | "DUSDC";
+  paymentToken?: PaymentToken;
   /** Ordered set of order IDs covered by this single on-chain transaction (batch payments). */
   orderIds?: string[];
   /** Ordered set of subscription IDs covered (parallel to `orderIds`). */
   subscriptionIds?: string[];
+  /** USD cents this payment represents (populated by PayPal webhook; optional otherwise). */
+  usdCents?: number;
   processedAt: string;
 }
 
+/**
+ * Normalize a renewal identifier into the canonical Firestore doc id.
+ * - DESO/DUSDC on-chain tx hash → lower-case, `0x`-stripped hex.
+ * - PayPal sale id              → `paypal_<lower-cased id>` (any string).
+ */
 export function normalizeRenewalTxHashHex(raw: string): string {
-  return raw.trim().toLowerCase().replace(/^0x/, "");
+  const t = raw.trim();
+  const lower = t.toLowerCase();
+  if (lower.startsWith("paypal_")) return lower;
+  return lower.replace(/^0x/, "");
+}
+
+/** True if `id` looks like a PayPal renewal record (opaque id, not on-chain hex). */
+function isPaypalRenewalId(id: string): boolean {
+  return id.startsWith("paypal_");
 }
 
 export async function getRenewalTxByHash(
   txHashHex: string
 ): Promise<RenewalTxRecord | undefined> {
   const id = normalizeRenewalTxHashHex(txHashHex);
-  if (!/^[0-9a-f]{64}$/.test(id)) return undefined;
+  if (!isPaypalRenewalId(id) && !/^[0-9a-f]{64}$/.test(id)) return undefined;
   const doc = await db().collection(COL_RENEWAL_TXS).doc(id).get();
   if (!doc.exists) return undefined;
   return doc.data() as RenewalTxRecord;
@@ -373,14 +421,16 @@ export async function commitSubscriptionRenewalWithTxRecord(params: {
   txHashHex: string;
   orderId: string;
   subscriptionId: string;
-  /** Total nanos for this payment (sum of months). */
+  /** Total nanos for this payment (sum of months). PayPal renewals may pass 0 when no DESO rate is available. */
   totalPaidNanos: number;
   /** Months of coverage (1–3). */
   months: number;
   /** Snapshot: one month in nanos written to the subscription row. */
   subscriptionMonthlyNanos: number;
   /** Token used to pay; omit for legacy DESO renewals. */
-  paymentToken?: "DESO" | "DUSDC";
+  paymentToken?: PaymentToken;
+  /** Optional USD cents amount for auditability (mainly populated by PayPal webhook). */
+  usdCents?: number;
   lastPaymentAt: string;
   nextPaymentAt: string;
 }): Promise<"applied" | "idempotent"> {
@@ -410,6 +460,9 @@ export async function commitSubscriptionRenewalWithTxRecord(params: {
       amountNanos: params.totalPaidNanos,
       months: params.months,
       ...(params.paymentToken ? { paymentToken: params.paymentToken } : {}),
+      ...(typeof params.usdCents === "number" && Number.isFinite(params.usdCents)
+        ? { usdCents: Math.max(0, Math.floor(params.usdCents)) }
+        : {}),
       processedAt: params.lastPaymentAt,
     };
     transaction.set(renewalRef, forFirestore(record));
@@ -449,11 +502,11 @@ export async function commitBatchSubscriptionRenewalWithTxRecord(params: {
   }>;
   /** Total DESO-equivalent nanos paid across all items. */
   totalPaidNanos: number;
-  paymentToken?: "DESO" | "DUSDC";
+  paymentToken?: PaymentToken;
   lastPaymentAt: string;
 }): Promise<"applied" | "idempotent"> {
   const txId = normalizeRenewalTxHashHex(params.txHashHex);
-  if (!/^[0-9a-f]{64}$/.test(txId)) {
+  if (!isPaypalRenewalId(txId) && !/^[0-9a-f]{64}$/.test(txId)) {
     throw new Error("Invalid txHash");
   }
   if (params.items.length === 0) {
@@ -835,4 +888,72 @@ export async function deleteHostedOsTemplate(
   await ref.delete();
   invalidateHostedOsTemplatesCache();
   return true;
+}
+
+// --- PayPal ----------------------------------------------------------------
+
+/**
+ * Cached PayPal Product + Plan (Billing Plans v1) for a given priced snapshot.
+ * Keyed by `${serviceId}:${monthlyUsdCents}:${env}` so a price change or an env
+ * switch (sandbox↔live) allocates a fresh Plan instead of reusing a stale one.
+ */
+export interface PaypalPlanRecord {
+  /** `${serviceId}:${monthlyUsdCents}:${env}` */
+  id: string;
+  serviceId: string;
+  /** Monthly total including any PayPal surcharge, in USD cents. */
+  monthlyUsdCents: number;
+  /** "sandbox" | "live" */
+  env: string;
+  /** PayPal Catalog Product id (`PROD-...`). */
+  paypalProductId: string;
+  /** PayPal Billing Plan id (`P-...`). */
+  paypalPlanId: string;
+  createdAt: string;
+}
+
+export function paypalPlanCacheId(
+  serviceId: string,
+  monthlyUsdCents: number,
+  env: string
+): string {
+  return `${serviceId}:${Math.max(0, Math.floor(monthlyUsdCents))}:${env}`;
+}
+
+export async function getPaypalPlanRecord(
+  id: string
+): Promise<PaypalPlanRecord | undefined> {
+  const doc = await db().collection(COL_PAYPAL_PLANS).doc(id).get();
+  if (!doc.exists) return undefined;
+  return doc.data() as PaypalPlanRecord;
+}
+
+export async function putPaypalPlanRecord(rec: PaypalPlanRecord): Promise<void> {
+  await db().collection(COL_PAYPAL_PLANS).doc(rec.id).set(forFirestore(rec));
+}
+
+/**
+ * PayPal webhook event idempotency: we `set` the event id inside a transaction
+ * with `create` semantics; a duplicate delivery finds the doc and skips.
+ */
+export async function recordPaypalEventIfNew(
+  eventId: string,
+  eventType: string
+): Promise<"new" | "duplicate"> {
+  const trimmed = eventId.trim();
+  if (!trimmed) return "duplicate";
+  const ref = db().collection(COL_PAYPAL_EVENTS).doc(trimmed);
+  try {
+    await ref.create({
+      eventId: trimmed,
+      eventType,
+      processedAt: new Date().toISOString(),
+    });
+    return "new";
+  } catch (e) {
+    // Firestore `create` throws when the doc already exists — treat as duplicate.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/already exists/i.test(msg)) return "duplicate";
+    throw e;
+  }
 }

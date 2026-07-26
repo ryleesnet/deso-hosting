@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getOrder } from "@/lib/db";
 import { listVmBackups, formatProxmoxApiError } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { resolveProxmoxBackupStoragePool } from "@/lib/proxmox-host-config";
 import { requireUser } from "@/lib/api-auth";
 
@@ -65,7 +66,8 @@ export async function GET(
     const { order } = loaded as { order: NonNullable<Awaited<ReturnType<typeof getOrder>>> };
 
     const storagePool = await resolveProxmoxBackupStoragePool();
-    const backups = await listVmBackups(order.node, order.vmid, storagePool);
+    const { node } = await resolveOrderVmLocation(order);
+    const backups = await listVmBackups(node, order.vmid, storagePool);
 
     return NextResponse.json({
       backups,

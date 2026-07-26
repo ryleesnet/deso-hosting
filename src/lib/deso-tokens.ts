@@ -12,16 +12,24 @@
  * plain constants and pure functions.
  */
 
-/** Supported non-DESO payment tokens. */
-export type PaymentToken = "DESO" | "DUSDC";
+/**
+ * Payment "token" is really a payment rail identifier. DESO and DUSDC are
+ * on-chain DeSo Identity transfers; PAYPAL is an off-chain PayPal subscription
+ * (see `src/lib/paypal.ts`). Everywhere in the code, PayPal payments store the
+ * subscription id in `Order.paypalSubscriptionId` / renewals in
+ * `RenewalTxRecord.txHashHex = "paypal_" + saleId`.
+ */
+export type PaymentToken = "DESO" | "DUSDC" | "PAYPAL";
 
-export const PAYMENT_TOKEN_VALUES = ["DESO", "DUSDC"] as const;
+export const PAYMENT_TOKEN_VALUES = ["DESO", "DUSDC", "PAYPAL"] as const;
 
 /** Parse an untrusted string into a PaymentToken (defaults to DESO). */
 export function parsePaymentToken(raw: unknown): PaymentToken {
   if (typeof raw !== "string") return "DESO";
   const upper = raw.trim().toUpperCase();
-  return upper === "DUSDC" ? "DUSDC" : "DESO";
+  if (upper === "DUSDC") return "DUSDC";
+  if (upper === "PAYPAL") return "PAYPAL";
+  return "DESO";
 }
 
 /**

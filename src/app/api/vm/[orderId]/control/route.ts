@@ -8,6 +8,7 @@ import {
   resetVM,
   formatProxmoxApiError,
 } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { requireUser } from "@/lib/api-auth";
 
 type Action =
@@ -76,24 +77,26 @@ export async function POST(
       );
     }
 
+    const { node } = await resolveOrderVmLocation(order);
+
     switch (action) {
       case "start":
-        await startVM(order.node, order.vmid);
+        await startVM(node, order.vmid);
         break;
       case "stop":
-        await shutdownVM(order.node, order.vmid); // Graceful stop
+        await shutdownVM(node, order.vmid); // Graceful stop
         break;
       case "shutdown":
-        await shutdownVM(order.node, order.vmid);
+        await shutdownVM(node, order.vmid);
         break;
       case "force_shutdown":
-        await stopVM(order.node, order.vmid, { overruleShutdown: true });
+        await stopVM(node, order.vmid, { overruleShutdown: true });
         break;
       case "reboot":
-        await rebootVM(order.node, order.vmid); // Graceful reboot
+        await rebootVM(node, order.vmid); // Graceful reboot
         break;
       case "reset":
-        await resetVM(order.node, order.vmid); // Force stop/restart
+        await resetVM(node, order.vmid); // Force stop/restart
         break;
     }
 

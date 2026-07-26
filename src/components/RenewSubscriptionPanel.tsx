@@ -9,6 +9,10 @@ import {
 } from "@/lib/renewal-months";
 import { apiFetch } from "@/lib/api-client";
 import type { PaymentToken } from "@/lib/deso-tokens";
+import { PayPalButton } from "@/components/PayPalButton";
+
+const PAYPAL_PUBLIC_CLIENT_ID =
+  process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID?.trim() || "";
 
 type RenewQuote = {
   orderId: string;
@@ -27,6 +31,12 @@ type RenewQuote = {
   rateSource: string;
   nextPaymentAt: string;
   subscriptionStatus: string;
+  paypalMonthlySurchargeCents: number;
+  paypalMonthlySurchargeFormatted: string;
+  paypalMonthlyUsdCents: number;
+  paypalMonthlyUsdFormatted: string;
+  paypalSurchargePercent: number;
+  paypalSurchargeFixedCents: number;
 };
 
 export function RenewSubscriptionPanel(props: {
@@ -34,7 +44,7 @@ export function RenewSubscriptionPanel(props: {
   userPublicKey: string;
   onSuccess?: () => void;
 }) {
-  const { orderId, onSuccess } = props;
+  const { orderId, userPublicKey, onSuccess } = props;
   const payee = getDesoPaymentRecipientPublicKey();
   const [months, setMonths] = useState(1);
   const [paymentToken, setPaymentToken] = useState<PaymentToken>("DESO");
@@ -65,6 +75,56 @@ export function RenewSubscriptionPanel(props: {
   useEffect(() => {
     if (open) loadQuote();
   }, [open, loadQuote]);
+
+  /**
+   * PayPal `createSubscription` for renewal: ensure a Plan exists for the
+   * order's current priced snapshot (base + surcharge) and return the id.
+   */
+  async function handlePaypalCreateSubscription(): Promise<{
+    paypalPlanId: string;
+    customId?: string;
+  }> {
+    const res = await apiFetch("/api/paypal/create-subscription", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ intent: "renew", orderId }),
+    });
+    const data = (await res.json()) as { error?: string; paypalPlanId?: string };
+    if (!res.ok || !data.paypalPlanId) {
+      throw new Error(data.error || "Could not create PayPal plan");
+    }
+    return {
+      paypalPlanId: data.paypalPlanId,
+      customId: `deso:${userPublicKey}`,
+    };
+  }
+
+  /**
+   * PayPal `onApprove` for renewal: link the new subscription to this order.
+   * The next-payment date is advanced automatically when PayPal fires
+   * `PAYMENT.SALE.COMPLETED` at our webhook.
+   */
+  async function handlePaypalApprove(paypalSubscriptionId: string) {
+    setPaying(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/paypal/renew-subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId, paypalSubscriptionId }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || "PayPal renewal setup failed");
+      }
+      setOpen(false);
+      onSuccess?.();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "PayPal renewal setup failed");
+    } finally {
+      setPaying(false);
+    }
+  }
 
   async function handlePay() {
     if (!payee || !quote) return;
@@ -182,6 +242,9 @@ export function RenewSubscriptionPanel(props: {
                 [
                   { id: "DESO" as const, label: "DESO" },
                   { id: "DUSDC" as const, label: "dUSDC" },
+                  ...(PAYPAL_PUBLIC_CLIENT_ID
+                    ? [{ id: "PAYPAL" as const, label: "PayPal auto-renew" }]
+                    : []),
                 ]
               ).map((opt) => (
                 <button
@@ -202,9 +265,9 @@ export function RenewSubscriptionPanel(props: {
               ))}
             </div>
             <p className="mt-1 text-xs text-[var(--muted)]">
-              dUSDC is the USD-pegged wrapped-USDC DeSo Token (1 dUSDC ≈ $1).
-              Your Identity wallet must hold a balance and will prompt for a
-              token-transfer permission.
+              {paymentToken === "PAYPAL"
+                ? "PayPal charges the monthly total (base + PayPal fee) automatically. Multi-month prepay isn't available for PayPal — PayPal manages the schedule."
+                : "dUSDC is the USD-pegged wrapped-USDC DeSo Token (1 dUSDC ≈ $1). Your Identity wallet must hold a balance and will prompt for a token-transfer permission."}
             </p>
           </div>
           {loading && (
@@ -245,7 +308,7 @@ export function RenewSubscriptionPanel(props: {
                       </dd>
                     </div>
                   </>
-                ) : (
+                ) : paymentToken === "DUSDC" ? (
                   <>
                     <div className="flex justify-between gap-4">
                       <dt className="text-[var(--muted)]">dUSDC / monthly</dt>
@@ -260,6 +323,28 @@ export function RenewSubscriptionPanel(props: {
                       </dd>
                     </div>
                   </>
+                ) : (
+                  <>
+                    {quote.paypalMonthlySurchargeCents > 0 && (
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-[var(--muted)]">
+                          PayPal fee ({quote.paypalSurchargePercent}%
+                          {quote.paypalSurchargeFixedCents > 0
+                            ? ` + $${(quote.paypalSurchargeFixedCents / 100).toFixed(2)}`
+                            : ""})
+                        </dt>
+                        <dd className="tabular-nums">
+                          +{quote.paypalMonthlySurchargeFormatted}
+                        </dd>
+                      </div>
+                    )}
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-[var(--muted)]">PayPal / monthly</dt>
+                      <dd className="font-medium tabular-nums text-[var(--accent)]">
+                        {quote.paypalMonthlyUsdFormatted}
+                      </dd>
+                    </div>
+                  </>
                 )}
               </dl>
               <p className="mt-2 text-xs text-[var(--muted)]">
@@ -268,22 +353,47 @@ export function RenewSubscriptionPanel(props: {
                     ~${quote.usdPerDeso.toFixed(4)} / DESO
                     {quote.rateSource === "env" ? " (DESO_USD_PRICE)" : " (node)"}
                   </>
-                ) : (
+                ) : paymentToken === "DUSDC" ? (
                   <>Fixed peg: 1 dUSDC = $1 (wrapped USDC on DeSo)</>
+                ) : (
+                  <>
+                    PayPal auto-renews at this monthly total until you cancel.
+                    Approving replaces any previous PayPal subscription on this
+                    VPS.
+                  </>
                 )}
               </p>
-              <button
-                type="button"
-                disabled={paying}
-                onClick={() => void handlePay()}
-                className="mt-4 w-full rounded-lg bg-[var(--accent)] py-2.5 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
-              >
-                {paying
-                  ? "Processing…"
-                  : paymentToken === "DUSDC"
-                    ? "Pay with dUSDC & extend billing"
-                    : "Pay with DeSo & extend billing"}
-              </button>
+              {paymentToken === "PAYPAL" ? (
+                <div className="mt-4">
+                  <PayPalButton
+                    clientId={PAYPAL_PUBLIC_CLIENT_ID}
+                    onCreateSubscription={handlePaypalCreateSubscription}
+                    onApprove={handlePaypalApprove}
+                    onError={(err) =>
+                      setError(
+                        err instanceof Error
+                          ? err.message
+                          : "PayPal reported an error. Please try again."
+                      )
+                    }
+                    disabled={paying}
+                    refreshKey={`renew-${orderId}`}
+                  />
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={paying}
+                  onClick={() => void handlePay()}
+                  className="mt-4 w-full rounded-lg bg-[var(--accent)] py-2.5 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
+                >
+                  {paying
+                    ? "Processing…"
+                    : paymentToken === "DUSDC"
+                      ? "Pay with dUSDC & extend billing"
+                      : "Pay with DeSo & extend billing"}
+                </button>
+              )}
               <button
                 type="button"
                 className="mt-2 w-full text-xs text-[var(--muted)] hover:underline"

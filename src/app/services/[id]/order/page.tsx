@@ -24,9 +24,12 @@ import {
   VM_DISPLAY_NAME_MAX_LEN,
   validateVmDisplayName,
 } from "@/lib/vm-name";
+import { PayPalButton } from "@/components/PayPalButton";
 
 const PAYMENT_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_DESO_PAYMENT_PUBLIC_KEY || "";
+const PAYPAL_PUBLIC_CLIENT_ID =
+  process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID?.trim() || "";
 
 type QuotePayload = {
   usdCents: number;
@@ -35,6 +38,12 @@ type QuotePayload = {
   desoFormatted: string;
   usdPerDeso: number;
   rateSource: string;
+  paypalSurchargeCents: number;
+  paypalSurchargeFormatted: string;
+  paypalUsdCents: number;
+  paypalUsdFormatted: string;
+  paypalSurchargePercent: number;
+  paypalSurchargeFixedCents: number;
 };
 
 type OrderService = {
@@ -222,43 +231,114 @@ export default function OrderPage() {
     setExtraDisksGb((prev) => prev.filter((_, i) => i !== index));
   }
 
-  async function handleOrder() {
-    if (!user || !service || !PAYMENT_PUBLIC_KEY) {
-      if (!PAYMENT_PUBLIC_KEY) setError("Payment not configured. Contact admin.");
+  /**
+   * Build the request body for `/api/orders/create` (DeSo/dUSDC path) or
+   * `/api/paypal/capture-order` (PayPal path). Both endpoints accept the same
+   * order-shape fields, so we compose them once.
+   */
+  function buildOrderCreatePayload(extras: Record<string, unknown>) {
+    if (!user || !service) return null;
+    const profilesCheckout = effectiveTemplatesForCheckout(
+      service,
+      hostedProfiles
+    );
+    return {
+      serviceId: service.id,
+      desoUsername: user.username,
+      vmDisplayName:
+        vmNameMode === "custom" && vmNameDraft.trim()
+          ? vmNameDraft.trim()
+          : undefined,
+      extraDisksGb: extraDisksGb.length ? extraDisksGb : undefined,
+      ...(profilesCheckout.length
+        ? {
+            imageProfileId:
+              selectedImageProfileId || profilesCheckout[0]!.id,
+          }
+        : {}),
+      sshAccess: sshAccess === "none" ? "none" : sshAccess,
+      sshPublicKey:
+        sshAccess === "paste" ? sshPublicKeyDraft.trim() : undefined,
+      acceptedTermsRevision: ORDER_TERMS_REVISION,
+      ...extras,
+    };
+  }
+
+  /** Shared post-order flow: show generated SSH key modal or redirect to dashboard. */
+  function afterOrderResponse(
+    data: {
+      generatedSshPrivateKey?: string;
+      generatedSshPublicKeyLine?: string;
+      order?: { id?: string };
+    }
+  ) {
+    if (
+      typeof data.generatedSshPrivateKey === "string" &&
+      typeof data.generatedSshPublicKeyLine === "string" &&
+      data.order?.id
+    ) {
+      setOrderKeyCopyHint(null);
+      setOrderKeyBundle({
+        orderId: data.order.id,
+        privateKey: data.generatedSshPrivateKey,
+        publicLine: data.generatedSshPublicKeyLine,
+      });
       return;
     }
+    router.replace("/dashboard");
+  }
 
+  /**
+   * Common pre-flight for both DeSo and PayPal checkouts. Returns `false` if
+   * a validation error was surfaced (caller should abort).
+   */
+  function validateOrderInputs(): boolean {
+    if (!user || !service) return false;
     if (!acceptedTerms) {
       setError(
         "You must agree to the Terms of Service & Acceptable Use Policy before completing your purchase."
       );
-      return;
+      return false;
     }
-
-    let vmDisplayName: string | undefined;
     if (vmNameMode === "custom") {
       const trimmed = vmNameDraft.trim();
       if (!trimmed) {
         setError("Enter a VM name, or choose Auto-generate.");
-        return;
+        return false;
       }
       const v = validateVmDisplayName(trimmed);
       if (!v.ok) {
         setError(v.error);
-        return;
+        return false;
       }
-      vmDisplayName = v.name;
     }
-
-    const profilesCheckout = effectiveTemplatesForCheckout(service, hostedProfiles);
+    const profilesCheckout = effectiveTemplatesForCheckout(
+      service,
+      hostedProfiles
+    );
     if (
       profilesCheckout.length > 0 &&
       (!selectedImageProfileId ||
         !profilesCheckout.some((p) => p.id === selectedImageProfileId))
     ) {
       setError("Choose an operating system image for this VPS.");
+      return false;
+    }
+    if (sshAccess === "paste" && !sshPublicKeyDraft.trim()) {
+      setError(
+        "Paste your SSH public key, or choose password-only / generate a new key."
+      );
+      return false;
+    }
+    return true;
+  }
+
+  async function handleOrder() {
+    if (!user || !service || !PAYMENT_PUBLIC_KEY) {
+      if (!PAYMENT_PUBLIC_KEY) setError("Payment not configured. Contact admin.");
       return;
     }
+    if (!validateOrderInputs()) return;
 
     const totalUsdCents =
       service.priceUsdCents + extraDisksAddonUsdCents(extraDisksGb);
@@ -281,11 +361,6 @@ export default function OrderPage() {
     setOrdering(true);
     setError(null);
     try {
-      if (sshAccess === "paste" && !sshPublicKeyDraft.trim()) {
-        throw new Error(
-          "Paste your SSH public key, or choose password-only / generate a new key."
-        );
-      }
       const memo = `DeSoHosting: ${service.name} (${formatUsdCents(totalUsdCents)})`;
       const paymentResult =
         paymentToken === "DUSDC"
@@ -296,46 +371,79 @@ export default function OrderPage() {
         (paymentResult as { submittedTransactionResponse?: { TransactionHashHex?: string } })?.submittedTransactionResponse?.TransactionHashHex ||
         (paymentResult as { constructedTransactionResponse?: { TransactionIDHex?: string } })?.constructedTransactionResponse?.TransactionIDHex;
 
+      const payload = buildOrderCreatePayload({
+        txHash: txHash || undefined,
+        paymentToken,
+      });
+      if (!payload) throw new Error("Order not ready");
       const res = await apiFetch("/api/orders/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          serviceId: service.id,
-          txHash: txHash || undefined,
-          paymentToken,
-          desoUsername: user.username,
-          vmDisplayName,
-          extraDisksGb: extraDisksGb.length ? extraDisksGb : undefined,
-          ...(profilesCheckout.length
-            ? {
-                imageProfileId:
-                  selectedImageProfileId || profilesCheckout[0]!.id,
-              }
-            : {}),
-          sshAccess: sshAccess === "none" ? "none" : sshAccess,
-          sshPublicKey:
-            sshAccess === "paste" ? sshPublicKeyDraft.trim() : undefined,
-          acceptedTermsRevision: ORDER_TERMS_REVISION,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      if (
-        typeof data.generatedSshPrivateKey === "string" &&
-        typeof data.generatedSshPublicKeyLine === "string" &&
-        data.order?.id
-      ) {
-        setOrderKeyCopyHint(null);
-        setOrderKeyBundle({
-          orderId: data.order.id as string,
-          privateKey: data.generatedSshPrivateKey,
-          publicLine: data.generatedSshPublicKeyLine,
-        });
-        return;
-      }
-      router.replace("/dashboard");
+      afterOrderResponse(data);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Order failed");
+    } finally {
+      setOrdering(false);
+    }
+  }
+
+  /**
+   * PayPal `createSubscription` callback: hits our server for the plan id
+   * that matches the current priced snapshot (base + surcharge) and returns
+   * it back to the PayPal SDK. Also passes a `custom_id` binding the buyer
+   * to their DeSo public key so the server can verify ownership on capture.
+   */
+  async function handlePaypalCreateSubscription(): Promise<{
+    paypalPlanId: string;
+    customId?: string;
+  }> {
+    if (!user || !service) throw new Error("Not ready");
+    if (!validateOrderInputs()) {
+      throw new Error(
+        "Please resolve the highlighted issue above before continuing to PayPal."
+      );
+    }
+    const res = await apiFetch("/api/paypal/create-subscription", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        intent: "new_order",
+        serviceId: service.id,
+        extraDisksGb: extraDisksGb.length ? extraDisksGb : undefined,
+      }),
+    });
+    const data = (await res.json()) as { error?: string; paypalPlanId?: string };
+    if (!res.ok || !data.paypalPlanId) {
+      throw new Error(data.error || "Could not create PayPal plan");
+    }
+    return {
+      paypalPlanId: data.paypalPlanId,
+      customId: `deso:${user.publicKey}`,
+    };
+  }
+
+  /** PayPal `onApprove`: send the PayPal subscription id to our server to create the order and start provisioning. */
+  async function handlePaypalApprove(paypalSubscriptionId: string) {
+    if (!user || !service) return;
+    setOrdering(true);
+    setError(null);
+    try {
+      const payload = buildOrderCreatePayload({ paypalSubscriptionId });
+      if (!payload) throw new Error("Order not ready");
+      const res = await apiFetch("/api/paypal/capture-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "PayPal checkout failed");
+      afterOrderResponse(data);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "PayPal checkout failed");
     } finally {
       setOrdering(false);
     }
@@ -503,7 +611,7 @@ export default function OrderPage() {
                   )}
                 </dd>
               </div>
-            ) : (
+            ) : paymentToken === "DUSDC" ? (
               <div className="flex justify-between gap-4">
                 <dt className="text-[var(--muted)]">dUSDC (this charge)</dt>
                 <dd className="font-medium tabular-nums text-[var(--accent)]">
@@ -512,6 +620,27 @@ export default function OrderPage() {
                   )}
                 </dd>
               </div>
+            ) : (
+              <>
+                {quote && quote.paypalSurchargeCents > 0 && (
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-[var(--muted)]">
+                      PayPal fee ({quote.paypalSurchargePercent}% + {formatUsdCents(quote.paypalSurchargeFixedCents)})
+                    </dt>
+                    <dd className="font-medium tabular-nums">
+                      +{quote.paypalSurchargeFormatted}
+                    </dd>
+                  </div>
+                )}
+                <div className="flex justify-between gap-4">
+                  <dt className="text-[var(--muted)]">PayPal (this charge)</dt>
+                  <dd className="font-medium tabular-nums text-[var(--accent)]">
+                    {quote
+                      ? quote.paypalUsdFormatted
+                      : formatUsdCents(service.priceUsdCents + extraAddonCents)}
+                  </dd>
+                </div>
+              </>
             )}
             {paymentToken === "DESO" && quote && (
               <p className="pt-1 text-xs text-[var(--muted)]">
@@ -524,6 +653,12 @@ export default function OrderPage() {
             {paymentToken === "DUSDC" && (
               <p className="pt-1 text-xs text-[var(--muted)]">
                 Fixed peg: 1 dUSDC = $1 (wrapped USDC on DeSo)
+              </p>
+            )}
+            {paymentToken === "PAYPAL" && (
+              <p className="pt-1 text-xs text-[var(--muted)]">
+                PayPal auto-renews this subscription every month at the price
+                shown. Cancel anytime from your dashboard or from PayPal.
               </p>
             )}
           </dl>
@@ -541,6 +676,9 @@ export default function OrderPage() {
                 [
                   { id: "DESO" as const, label: "DESO" },
                   { id: "DUSDC" as const, label: "dUSDC" },
+                  ...(PAYPAL_PUBLIC_CLIENT_ID
+                    ? [{ id: "PAYPAL" as const, label: "PayPal" }]
+                    : []),
                 ]
               ).map((opt) => (
                 <button
@@ -561,9 +699,9 @@ export default function OrderPage() {
               ))}
             </div>
             <p className="mt-1 text-xs text-[var(--muted)]">
-              dUSDC is the USD-pegged wrapped-USDC DeSo Token (1 dUSDC ≈ $1).
-              Your Identity wallet must hold a balance and will prompt for a
-              token-transfer permission.
+              {paymentToken === "PAYPAL"
+                ? "PayPal charges the price above (base + PayPal fee) every month and auto-renews until you cancel."
+                : "dUSDC is the USD-pegged wrapped-USDC DeSo Token (1 dUSDC ≈ $1). Your Identity wallet must hold a balance and will prompt for a token-transfer permission."}
             </p>
           </div>
         </div>
@@ -856,24 +994,63 @@ export default function OrderPage() {
             </span>
           </label>
         </div>
-        <button
-          onClick={handleOrder}
-          disabled={
-            ordering ||
-            (paymentToken === "DESO" && (quoteLoading || !!quoteError)) ||
-            !acceptedTerms ||
-            (vmNameMode === "custom" &&
-              vmNameValidation !== null &&
-              !vmNameValidation.ok)
-          }
-          className="mt-6 w-full rounded-lg bg-[var(--accent)] py-3 font-medium text-[var(--background)] transition hover:bg-[var(--accent-muted)] disabled:opacity-50"
-        >
-          {ordering
-            ? "Processing..."
-            : paymentToken === "DUSDC"
-              ? "Pay with dUSDC & Order"
-              : "Pay with DeSo & Order"}
-        </button>
+        {paymentToken === "PAYPAL" ? (
+          <div className="mt-6">
+            {ordering && (
+              <p className="mb-2 text-sm text-[var(--muted)]">Processing…</p>
+            )}
+            <PayPalButton
+              clientId={PAYPAL_PUBLIC_CLIENT_ID}
+              onCreateSubscription={handlePaypalCreateSubscription}
+              onApprove={handlePaypalApprove}
+              onError={(err) =>
+                setError(
+                  err instanceof Error
+                    ? err.message
+                    : "PayPal reported an error. Please try again."
+                )
+              }
+              disabled={
+                ordering ||
+                !acceptedTerms ||
+                (vmNameMode === "custom" &&
+                  vmNameValidation !== null &&
+                  !vmNameValidation.ok)
+              }
+              refreshKey={JSON.stringify({
+                extra: extraDisksGb,
+                terms: acceptedTerms,
+                vm: vmNameMode === "custom" ? vmNameDraft.trim() : "auto",
+                img: selectedImageProfileId,
+                ssh: sshAccess,
+              })}
+            />
+            <p className="mt-2 text-xs text-[var(--muted)]">
+              You&apos;ll be redirected to a PayPal popup to authorize the monthly
+              subscription. Provisioning starts as soon as PayPal confirms the
+              subscription.
+            </p>
+          </div>
+        ) : (
+          <button
+            onClick={handleOrder}
+            disabled={
+              ordering ||
+              (paymentToken === "DESO" && (quoteLoading || !!quoteError)) ||
+              !acceptedTerms ||
+              (vmNameMode === "custom" &&
+                vmNameValidation !== null &&
+                !vmNameValidation.ok)
+            }
+            className="mt-6 w-full rounded-lg bg-[var(--accent)] py-3 font-medium text-[var(--background)] transition hover:bg-[var(--accent-muted)] disabled:opacity-50"
+          >
+            {ordering
+              ? "Processing..."
+              : paymentToken === "DUSDC"
+                ? "Pay with dUSDC & Order"
+                : "Pay with DeSo & Order"}
+          </button>
+        )}
       </div>
     </div>
   );

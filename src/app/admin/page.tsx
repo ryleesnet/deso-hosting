@@ -394,6 +394,58 @@ export default function AdminPage() {
     }
   }
 
+  /**
+   * Admin action: full refund of the latest PayPal capture on this order.
+   * Also cancels the PayPal subscription and destroys the VPS (parity with
+   * a user-initiated cancel). The `PAYMENT.SALE.REFUNDED` webhook that
+   * PayPal will fire is idempotent via `paypal_events`.
+   */
+  const [paypalRefundBusy, setPaypalRefundBusy] = useState<string | null>(null);
+  const [paypalRefundError, setPaypalRefundError] = useState<string | null>(null);
+
+  async function handlePaypalRefund(orderId: string) {
+    if (
+      !confirm(
+        "Refund the most recent PayPal capture on this order, cancel the PayPal subscription, and destroy the VPS?\n\nThis cannot be undone."
+      )
+    ) {
+      return;
+    }
+    setPaypalRefundError(null);
+    setPaypalRefundBusy(orderId);
+    try {
+      const res = await apiFetch(
+        `/api/admin/orders/${orderId}/paypal-refund`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reason: "Refund issued by administrator",
+          }),
+        }
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        refund?: { amount?: string } | null;
+      };
+      if (!res.ok) {
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+      alert(
+        data.refund
+          ? `Refunded $${data.refund.amount ?? "?"} via PayPal and cancelled the VPS.`
+          : "PayPal subscription cancelled and VPS destroyed."
+      );
+      loadData();
+    } catch (e) {
+      setPaypalRefundError(
+        e instanceof Error ? e.message : "PayPal refund failed"
+      );
+    } finally {
+      setPaypalRefundBusy(null);
+    }
+  }
+
   /** Import existing VM: link Firestore order + subscription without cloning. */
   const [importUserId, setImportUserId] = useState("");
   const [importServiceId, setImportServiceId] = useState("");
@@ -609,6 +661,17 @@ export default function AdminPage() {
             {notifyError}
             <button
               onClick={() => setNotifyError(null)}
+              className="ml-2 underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+        {paypalRefundError && (
+          <div className="mt-4 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm text-red-400">
+            PayPal refund: {paypalRefundError}
+            <button
+              onClick={() => setPaypalRefundError(null)}
               className="ml-2 underline"
             >
               Dismiss
@@ -900,6 +963,25 @@ export default function AdminPage() {
                           className="rounded border border-amber-500/50 px-2 py-1 text-xs text-amber-400 hover:bg-amber-500/10 disabled:opacity-50"
                         >
                           {notifyBusy === o.id ? "Sending…" : "Notify past due"}
+                        </button>
+                      ) : null}
+                      {o.paymentProvider === "paypal" &&
+                      o.paypalSubscriptionId &&
+                      o.status !== "cancelled" ? (
+                        <button
+                          type="button"
+                          onClick={() => void handlePaypalRefund(o.id)}
+                          disabled={paypalRefundBusy === o.id}
+                          title={
+                            o.paypalPayerEmail
+                              ? `PayPal payer: ${o.paypalPayerEmail}`
+                              : "Full refund + cancel PayPal subscription + destroy VPS"
+                          }
+                          className="rounded border border-blue-500/50 px-2 py-1 text-xs text-blue-400 hover:bg-blue-500/10 disabled:opacity-50"
+                        >
+                          {paypalRefundBusy === o.id
+                            ? "Refunding…"
+                            : "Refund via PayPal"}
                         </button>
                       ) : null}
                       <button

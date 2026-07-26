@@ -6,6 +6,7 @@ import {
   formatProxmoxApiError,
   getQemuCloudInitCiuser,
 } from "@/lib/proxmox";
+import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { requireUser } from "@/lib/api-auth";
 
 export async function POST(
@@ -47,9 +48,11 @@ export async function POST(
       );
     }
 
+    const { node } = await resolveOrderVmLocation(order);
+
     let ciuser = order.vmLoginUsername?.trim() || "";
     if (!ciuser) {
-      ciuser = (await getQemuCloudInitCiuser(order.node, order.vmid)) || "";
+      ciuser = (await getQemuCloudInitCiuser(node, order.vmid)) || "";
     }
     if (!ciuser) {
       return NextResponse.json(
@@ -63,7 +66,7 @@ export async function POST(
 
     const newPassword = generateVmPassword();
     await applyCloudInitPasswordAndRegenerate(
-      order.node,
+      node,
       order.vmid,
       ciuser,
       newPassword

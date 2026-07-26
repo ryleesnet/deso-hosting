@@ -70,6 +70,15 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+    if (paymentToken === "PAYPAL") {
+      return NextResponse.json(
+        {
+          error:
+            "PayPal renewals must be authorized per-order via the PayPal flow, not batched here.",
+        },
+        { status: 400 }
+      );
+    }
     if (items.length > MAX_BATCH_RENEWAL_ORDERS) {
       return NextResponse.json(
         { error: `Too many orders (max ${MAX_BATCH_RENEWAL_ORDERS} per batch).` },
