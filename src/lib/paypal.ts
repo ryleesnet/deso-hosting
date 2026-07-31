@@ -59,11 +59,33 @@ export function paypalIsConfigured(): boolean {
   return !!(c.clientId && c.clientSecret);
 }
 
-/** Public client id used by `NEXT_PUBLIC_PAYPAL_CLIENT_ID` for the JS SDK. */
+/**
+ * Public client id used by the JS SDK on order / renew pages.
+ *
+ * Always the CLIENT_ID for the current `PAYPAL_ENV` — never the browser-baked
+ * `NEXT_PUBLIC_PAYPAL_CLIENT_ID`. If the two disagree we log a loud warning
+ * because that mismatch causes `RESOURCE_NOT_FOUND` at checkout: the browser
+ * SDK loads against one PayPal environment (sandbox/live) but the Plan id the
+ * server hands it belongs to the other environment.
+ *
+ * The fix is either:
+ *   1. Set `NEXT_PUBLIC_PAYPAL_CLIENT_ID` to match `PAYPAL_*_CLIENT_ID` for
+ *      the current `PAYPAL_ENV`, and redeploy so the client bundle picks it up.
+ *   2. Leave `NEXT_PUBLIC_PAYPAL_CLIENT_ID` blank in prod and let the frontend
+ *      fetch this value from `/api/paypal/config` (the JS SDK then always
+ *      matches whatever env the server is in — no possibility of drift).
+ */
 export function paypalPublicClientId(): string {
-  return (
-    process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID?.trim() || readEnv().clientId
-  );
+  const { env, clientId } = readEnv();
+  const nextPublic = process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID?.trim() || "";
+  if (nextPublic && clientId && nextPublic !== clientId) {
+    console.warn(
+      `[paypal] NEXT_PUBLIC_PAYPAL_CLIENT_ID does not match PAYPAL_${env.toUpperCase()}_CLIENT_ID. ` +
+        `The browser SDK would load against the wrong PayPal environment and hit RESOURCE_NOT_FOUND. ` +
+        `Serving the server-side ${env} client id to the frontend instead.`
+    );
+  }
+  return clientId || nextPublic;
 }
 
 function apiBase(env: PaypalEnv): string {

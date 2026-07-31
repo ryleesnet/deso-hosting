@@ -13,9 +13,16 @@
  *
  * The parent component owns the "what does approval mean" logic (create a new
  * order, or attach the subscription to an existing order for renewal).
+ *
+ * The client id used for the SDK URL is *always* fetched from
+ * `/api/paypal/config`, so the browser SDK loads against the same PayPal
+ * environment (sandbox/live) that the server is issuing Plan ids for. Any
+ * `NEXT_PUBLIC_PAYPAL_CLIENT_ID` passed in as a prop is used only as an
+ * optimistic prefetch — a server-side value that disagrees always wins.
  */
 
 import { useEffect, useRef, useState } from "react";
+import { apiFetch } from "@/lib/api-client";
 
 const SDK_SCRIPT_ID = "paypal-js-sdk";
 
@@ -94,8 +101,13 @@ function loadPaypalSdk(clientId: string): Promise<PaypalNamespace> {
 }
 
 export interface PayPalButtonProps {
-  /** Public PayPal client id (must match current PAYPAL_ENV on the server). */
-  clientId: string;
+  /**
+   * Optional public PayPal client id. Treated as an optimistic hint only —
+   * the component always fetches the authoritative id from
+   * `/api/paypal/config` before loading the SDK so it can't drift from the
+   * server's `PAYPAL_ENV`.
+   */
+  clientId?: string;
   /**
    * Called when the button needs a plan id. Return the plan id + optional
    * custom_id (we always include the caller's DeSo public key so the server
@@ -115,9 +127,39 @@ export interface PayPalButtonProps {
   refreshKey?: string;
 }
 
+/**
+ * Fetch the correct PayPal SDK config from the server.
+ *
+ * Cached at module scope so multiple `<PayPalButton>` instances on one page
+ * (bulk-renew list, per-VPS panel, etc.) share a single request.
+ */
+let paypalConfigPromise: Promise<{ clientId: string; configured: boolean }> | null =
+  null;
+
+function fetchPaypalConfig(): Promise<{ clientId: string; configured: boolean }> {
+  if (paypalConfigPromise) return paypalConfigPromise;
+  paypalConfigPromise = apiFetch("/api/paypal/config")
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`PayPal config HTTP ${res.status}`);
+      const data = (await res.json()) as {
+        configured?: boolean;
+        clientId?: string;
+      };
+      return {
+        clientId: typeof data.clientId === "string" ? data.clientId : "",
+        configured: data.configured === true,
+      };
+    })
+    .catch((e) => {
+      paypalConfigPromise = null;
+      throw e;
+    });
+  return paypalConfigPromise;
+}
+
 export function PayPalButton(props: PayPalButtonProps) {
   const {
-    clientId,
+    clientId: clientIdHint,
     onCreateSubscription,
     onApprove,
     onCancel,
@@ -128,11 +170,49 @@ export function PayPalButton(props: PayPalButtonProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Configuration errors are computed from render-time props (not setState'd
-  // from inside the effect, which React's stricter effect linter forbids).
-  const configError = !clientId
-    ? "PayPal client id is not configured on this page."
-    : null;
+  const [resolvedClientId, setResolvedClientId] = useState<string>("");
+
+  // Fetch the server-provided client id once and cache module-wide. This is
+  // the id we actually hand to the JS SDK — any hint passed by the parent is
+  // only used as a placeholder to hide the button when PayPal isn't set up.
+  useEffect(() => {
+    let cancelled = false;
+    fetchPaypalConfig()
+      .then((cfg) => {
+        if (cancelled) return;
+        if (!cfg.configured || !cfg.clientId) {
+          setLoadError(
+            "PayPal is not configured on the server. Please try another payment method."
+          );
+          setLoading(false);
+          return;
+        }
+        setResolvedClientId(cfg.clientId);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setLoadError(
+          err instanceof Error
+            ? `Could not load PayPal config: ${err.message}`
+            : "Could not load PayPal config"
+        );
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const effectiveClientId = resolvedClientId;
+  const configError =
+    !clientIdHint && !resolvedClientId
+      ? // The parent didn't hint that PayPal is enabled AND the server hasn't
+        // resolved yet: this happens naturally on first render, so don't show
+        // an error message — just wait for the config fetch.
+        null
+      : !effectiveClientId && !loading
+        ? "PayPal client id is not configured on this page."
+        : null;
   const effectiveError = configError ?? loadError;
 
   // Keep the latest callbacks in refs so the SDK closure doesn't capture stale
@@ -154,13 +234,13 @@ export function PayPalButton(props: PayPalButtonProps) {
     // possibly-stale `containerRef.current` (React can null it before cleanup).
     const container = containerRef.current;
     if (!container) return;
-    if (!clientId || disabled) {
+    if (!effectiveClientId || disabled) {
       // Nothing to load — the render already reflects the config error /
       // disabled state via `effectiveError` and the `loading` initial value.
       return;
     }
 
-    loadPaypalSdk(clientId)
+    loadPaypalSdk(effectiveClientId)
       .then((paypal) => {
         if (cancelled) return;
         // Async transitions: safe to setState here (not synchronous in effect body).
@@ -221,7 +301,7 @@ export function PayPalButton(props: PayPalButtonProps) {
     // (e.g. after form inputs change) even when the other dep values are
     // stable. React's exhaustive-deps rule is happy — no eslint-disable
     // required. The callback refs (`onCreateRef`, etc.) are stable by design.
-  }, [clientId, disabled, refreshKey]);
+  }, [effectiveClientId, disabled, refreshKey]);
 
   return (
     <div>
