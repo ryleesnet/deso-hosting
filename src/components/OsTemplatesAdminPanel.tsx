@@ -11,6 +11,12 @@ type Row = {
   active: boolean;
   sortOrder: number;
   createdAt: string;
+  /**
+   * Cloud-image filename (or absolute path) on the Proxmox host. When set,
+   * reinstall performs an in-place disk swap (`qm importdisk`-style) using
+   * this image instead of full-cloning the template VMID.
+   */
+  imageFile?: string;
 };
 
 /** Admin CRUD for global Firestore catalogue `os_templates`. */
@@ -25,6 +31,7 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
   const [draftLabel, setDraftLabel] = useState("");
   const [draftVmid, setDraftVmid] = useState("");
   const [draftSort, setDraftSort] = useState("");
+  const [draftImageFile, setDraftImageFile] = useState("");
   const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
@@ -73,6 +80,7 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
           sortOrder: draftSort.trim()
             ? Math.floor(parseInt(draftSort, 10))
             : undefined,
+          imageFile: draftImageFile.trim() ? draftImageFile.trim() : undefined,
         }),
       });
       const data = await res.json();
@@ -81,6 +89,7 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
       setDraftLabel("");
       setDraftVmid("");
       setDraftSort("");
+      setDraftImageFile("");
       await load();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Create failed");
@@ -101,6 +110,12 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
           templateVmid: patch.templateVmid,
           active: patch.active,
           sortOrder: patch.sortOrder,
+          // `imageFile` is only forwarded when the row editor explicitly
+          // touched it — undefined leaves the stored value alone, and an
+          // empty string is normalised to `null` so PATCH can clear it.
+          ...(patch.imageFile !== undefined
+            ? { imageFile: patch.imageFile === "" ? null : patch.imageFile }
+            : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -142,6 +157,18 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
         Name each Proxmox template guest (clone source VMID). Customers choose one at checkout and
         when reinstalling. Inactive templates stay off the storefront but remain editable here.
         Per-VPS overrides are still possible from <strong className="text-[var(--foreground)]">Orders → VPS OS templates</strong>.
+      </p>
+      <p className="mt-2 max-w-3xl text-xs text-[var(--muted)] leading-relaxed">
+        Set an <strong className="text-[var(--foreground)]">Image file</strong> (e.g.{" "}
+        <code className="rounded bg-[var(--background)] px-1">ubuntu-26.04-server-cloudimg-amd64.qcow2</code>)
+        to switch reinstall to the fast in-place disk swap flow ({" "}
+        <code className="rounded bg-[var(--background)] px-1">qm importdisk</code> equivalent, no full clone).
+        Bare filenames are pulled from the Proxmox <em>import</em> storage named by{" "}
+        <code className="rounded bg-[var(--background)] px-1">PROXMOX_CLOUD_IMAGE_STORAGE</code>{" "}
+        (default <code className="rounded bg-[var(--background)] px-1">cloudimg</code>) — one-time PVE setup:
+        {" "}
+        <code className="rounded bg-[var(--background)] px-1">mkdir -p /cloudimg &amp;&amp; pvesm add dir cloudimg --path /cloudimg --content import</code>.
+        Leave blank to keep the legacy full-clone reinstall.
       </p>
 
       <form onSubmit={(e) => void handleCreate(e)} className="mt-6 rounded-2xl border border-[var(--card-border)] bg-[var(--card)]/35 p-4">
@@ -202,6 +229,17 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
               placeholder="0"
             />
           </div>
+          <div className="lg:col-span-12">
+            <label className="text-xs font-medium text-[var(--muted)]">
+              Image file (optional, enables in-place reinstall)
+            </label>
+            <input
+              value={draftImageFile}
+              onChange={(e) => setDraftImageFile(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
+              placeholder="ubuntu-26.04-server-cloudimg-amd64.qcow2"
+            />
+          </div>
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
@@ -221,13 +259,14 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
       ) : null}
 
       <div className="mt-6 overflow-auto rounded-2xl border border-[var(--card-border)]">
-        <table className="w-full min-w-[760px] text-sm">
+        <table className="w-full min-w-[900px] text-sm">
           <thead className="bg-[var(--card)] shadow-[0_1px_0_var(--card-border)]">
             <tr>
               <th className="px-3 py-2 text-left font-medium">Active</th>
               <th className="px-3 py-2 text-left font-medium">Label</th>
               <th className="px-3 py-2 text-left font-medium">VMID</th>
               <th className="px-3 py-2 text-left font-medium">Profile ID</th>
+              <th className="px-3 py-2 text-left font-medium">Image file</th>
               <th className="px-3 py-2 text-left font-medium">Sort</th>
               <th className="px-3 py-2 text-left font-medium">Actions</th>
             </tr>
@@ -235,13 +274,13 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={6} className="px-3 py-8 text-[var(--muted)]">
+                <td colSpan={7} className="px-3 py-8 text-[var(--muted)]">
                   Loading templates…
                 </td>
               </tr>
             ) : templates.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-3 py-8 text-[var(--muted)]">
+                <td colSpan={7} className="px-3 py-8 text-[var(--muted)]">
                   No global OS templates yet — add Ubuntu 26.04 LTS (VMID <code className="rounded px-1">5001</code>) above.
                 </td>
               </tr>
@@ -270,21 +309,30 @@ function OsTemplateEditableRow(props: {
   onRemove: () => void;
 }) {
   const { row, busy, onPatch, onRemove } = props;
+  // Reset local draft fields whenever the parent row snapshot changes (e.g.
+  // after a successful PATCH reload). Using React's "adjust state during
+  // render" pattern instead of a `useEffect` so we don't cascade renders and
+  // stay within the `react-hooks/set-state-in-effect` lint rule.
+  const [rowSnapshot, setRowSnapshot] = useState(row);
   const [label, setLabel] = useState(row.label);
   const [vmid, setVmid] = useState(String(row.templateVmid));
   const [sortOrder, setSortOrder] = useState(String(row.sortOrder));
-  useEffect(() => {
+  const [imageFile, setImageFile] = useState(row.imageFile ?? "");
+  if (rowSnapshot !== row) {
+    setRowSnapshot(row);
     setLabel(row.label);
     setVmid(String(row.templateVmid));
     setSortOrder(String(row.sortOrder));
-  }, [row]);
+    setImageFile(row.imageFile ?? "");
+  }
 
   const tvm = Math.floor(Number(vmid));
   const sortN = Math.floor(Number(sortOrder) || 0);
   const dirty =
     label.trim() !== row.label.trim() ||
     tvm !== row.templateVmid ||
-    sortN !== row.sortOrder;
+    sortN !== row.sortOrder ||
+    imageFile.trim() !== (row.imageFile ?? "").trim();
   const canSave =
     label.trim().length > 0 && Number.isFinite(tvm) && tvm > 0;
 
@@ -321,6 +369,15 @@ function OsTemplateEditableRow(props: {
       <td className="px-3 py-2 align-middle font-mono text-xs text-[var(--muted)]">{row.id}</td>
       <td className="px-3 py-2 align-middle">
         <input
+          value={imageFile}
+          onChange={(e) => setImageFile(e.target.value)}
+          disabled={busy}
+          placeholder="(clone reinstall)"
+          className="w-56 rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 font-mono text-xs"
+        />
+      </td>
+      <td className="px-3 py-2 align-middle">
+        <input
           type="number"
           value={sortOrder}
           onChange={(e) => setSortOrder(e.target.value)}
@@ -338,6 +395,7 @@ function OsTemplateEditableRow(props: {
                 label: label.trim(),
                 templateVmid: tvm,
                 sortOrder: sortN,
+                imageFile: imageFile.trim(),
               })
             }
             className="rounded border border-[var(--card-border)] px-2 py-1 text-xs hover:bg-[var(--card)] disabled:opacity-40"

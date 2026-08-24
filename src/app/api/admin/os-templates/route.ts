@@ -28,6 +28,7 @@ export async function POST(req: NextRequest) {
       templateVmid?: unknown;
       active?: unknown;
       sortOrder?: unknown;
+      imageFile?: unknown;
     };
     const label = typeof body.label === "string" ? body.label : "";
     const tvmid = body.templateVmid;
@@ -46,6 +47,8 @@ export async function POST(req: NextRequest) {
       body.sortOrder != null && Number.isFinite(Number(body.sortOrder))
         ? Math.floor(Number(body.sortOrder))
         : 0;
+    const imageFile =
+      typeof body.imageFile === "string" ? body.imageFile : undefined;
 
     const tryCreate = await createHostedOsTemplate({
       id,
@@ -53,6 +56,7 @@ export async function POST(req: NextRequest) {
       templateVmid,
       active,
       sortOrder,
+      imageFile,
     });
     if ("error" in tryCreate) {
       if (
@@ -66,6 +70,7 @@ export async function POST(req: NextRequest) {
           templateVmid,
           active,
           sortOrder,
+          imageFile,
         });
         if ("error" in retry) {
           return NextResponse.json({ error: retry.error }, { status: 400 });

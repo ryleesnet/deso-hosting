@@ -5,6 +5,23 @@ export type { ServiceImageProfile } from "@/lib/db";
 const PROFILE_ID_RE = /^[a-z][a-z0-9_-]{0,62}$/i;
 const MAX_PROFILES = 20;
 
+const IMAGE_FILE_INVALID_CHARS_RE = /[\s"'`;|&$<>*?()\\]/;
+
+/**
+ * Same validation as `db.validateOsTemplateImageFile` — kept local so this
+ * module (used by both server + edge-adjacent bundles) stays free of
+ * firebase-admin imports.
+ */
+function sanitizeImageFileValue(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const s = raw.trim();
+  if (!s) return undefined;
+  if (s.length > 512) return undefined;
+  if (IMAGE_FILE_INVALID_CHARS_RE.test(s)) return undefined;
+  if (s.includes("..")) return undefined;
+  return s;
+}
+
 /** Normalize & validate incoming JSON for Firestore PATCH/POST (returns [] when invalid shapes). */
 export function sanitizeImageProfilesInput(raw: unknown): ServiceImageProfile[] {
   if (!Array.isArray(raw)) return [];
@@ -33,7 +50,13 @@ export function sanitizeImageProfilesInput(raw: unknown): ServiceImageProfile[] 
     if (ids.has(id) || vmids.has(templateVmid)) continue;
     ids.add(id);
     vmids.add(templateVmid);
-    out.push({ id, label, templateVmid });
+    const imageFile = sanitizeImageFileValue(o.imageFile);
+    out.push({
+      id,
+      label,
+      templateVmid,
+      ...(imageFile ? { imageFile } : {}),
+    });
   }
   return out;
 }

@@ -18,6 +18,7 @@ export async function PATCH(
       templateVmid?: unknown;
       active?: unknown;
       sortOrder?: unknown;
+      imageFile?: unknown;
     };
     const updates: Parameters<typeof updateHostedOsTemplate>[1] = {};
     if (typeof body.label === "string") updates.label = body.label;
@@ -39,6 +40,11 @@ export async function PATCH(
       updates.sortOrder = Number.isFinite(Number(body.sortOrder))
         ? Math.floor(Number(body.sortOrder))
         : undefined;
+    if (body.imageFile === null) {
+      updates.imageFile = null;
+    } else if (typeof body.imageFile === "string") {
+      updates.imageFile = body.imageFile;
+    }
 
     const out = await updateHostedOsTemplate(id, updates);
     if (!out) {

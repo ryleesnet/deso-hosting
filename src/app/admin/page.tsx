@@ -75,7 +75,12 @@ export default function AdminPage() {
   /** Admin modal: VPS-level OS catalogue (`orders.imageProfiles`). */
   const [orderTemplatesModal, setOrderTemplatesModal] = useState<null | {
     orderId: string;
-    profiles: { id: string; label: string; templateVmid: number }[];
+    profiles: {
+      id: string;
+      label: string;
+      templateVmid: number;
+      imageFile?: string;
+    }[];
     hint?: string;
   }>(null);
   const [loading, setLoading] = useState(true);

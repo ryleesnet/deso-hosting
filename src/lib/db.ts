@@ -29,6 +29,19 @@ export type ServiceImageProfile = {
   label: string;
   /** Source QEMU VMID (template guest) on Proxmox. */
   templateVmid: number;
+  /**
+   * Optional cloud-image filename (or absolute path) on the Proxmox host used
+   * for the in-place reinstall flow (`qm importdisk` / API `import-from`).
+   *
+   * When set, reinstall does NOT destroy+clone: it stops the VM, deletes the
+   * root disk, imports this qcow2 as virtio0, resizes to the current size, and
+   * restarts. When absent, reinstall falls back to the legacy full-clone flow
+   * that uses `templateVmid`.
+   *
+   * Bare filenames are resolved against `PROXMOX_CLOUD_IMAGE_DIR` (default
+   * `/root/`); values starting with `/` are used as absolute paths.
+   */
+  imageFile?: string;
 };
 
 export interface VPSService {
@@ -681,6 +694,10 @@ function parseHostedTemplateDoc(
     typeof raw.createdAt === "string"
       ? raw.createdAt
       : new Date().toISOString();
+  const imageFile =
+    typeof raw.imageFile === "string" && raw.imageFile.trim()
+      ? raw.imageFile.trim().slice(0, 512)
+      : undefined;
   return {
     id: docId,
     label,
@@ -688,6 +705,7 @@ function parseHostedTemplateDoc(
     active,
     sortOrder: sortOrderSan,
     createdAt,
+    ...(imageFile ? { imageFile } : {}),
   };
 }
 
@@ -710,7 +728,12 @@ export async function readActiveOsTemplateProfiles(): Promise<ServiceImageProfil
         a.label.localeCompare(b.label) ||
         a.id.localeCompare(b.id)
     )
-    .map(({ id, label, templateVmid }) => ({ id, label, templateVmid }));
+    .map(({ id, label, templateVmid, imageFile }) => ({
+      id,
+      label,
+      templateVmid,
+      ...(imageFile ? { imageFile } : {}),
+    }));
 
   hostedOsTemplatesCache = { at: now, data: rows };
   return rows;
@@ -748,12 +771,34 @@ async function vmidTakenInHostedTemplates(
   return false;
 }
 
+/**
+ * Basic validation for a cloud-image reference stored on OS templates:
+ * either a bare filename (resolved against `PROXMOX_CLOUD_IMAGE_DIR` at import
+ * time) or an absolute host path. Reject shell metacharacters + `..` segments
+ * so an admin typo cannot inject into the Proxmox API disk config string.
+ */
+export function validateOsTemplateImageFile(
+  raw: string
+): string | { error: string } {
+  const s = raw.trim();
+  if (!s) return { error: "Image file cannot be empty." };
+  if (s.length > 512) return { error: "Image file path is too long." };
+  if (/[\s"'`;|&$<>*?()\\]/.test(s)) {
+    return { error: "Image file contains invalid characters." };
+  }
+  if (s.includes("..")) {
+    return { error: "Image file must not contain '..' path segments." };
+  }
+  return s;
+}
+
 export async function createHostedOsTemplate(params: {
   id: string;
   label: string;
   templateVmid: number;
   active?: boolean;
   sortOrder?: number;
+  imageFile?: string | null;
 }): Promise<HostedOsTemplateRecord | { error: string }> {
   const id = params.id.trim().toLowerCase();
   if (!OS_TEMPLATE_ID_RE.test(id)) {
@@ -792,6 +837,13 @@ export async function createHostedOsTemplate(params: {
     return { error: "Another OS template already uses this Proxmox VMID." };
   }
 
+  let imageFile: string | undefined;
+  if (typeof params.imageFile === "string" && params.imageFile.trim()) {
+    const validated = validateOsTemplateImageFile(params.imageFile);
+    if (typeof validated === "object") return { error: validated.error };
+    imageFile = validated;
+  }
+
   await ref.set(
     forFirestore({
       label,
@@ -799,6 +851,7 @@ export async function createHostedOsTemplate(params: {
       active,
       sortOrder,
       createdAt,
+      ...(imageFile ? { imageFile } : {}),
     })
   );
   invalidateHostedOsTemplatesCache();
@@ -809,6 +862,7 @@ export async function createHostedOsTemplate(params: {
     active,
     sortOrder,
     createdAt,
+    ...(imageFile ? { imageFile } : {}),
   };
 }
 
@@ -819,6 +873,8 @@ export async function updateHostedOsTemplate(
     templateVmid: number;
     active: boolean;
     sortOrder: number;
+    /** `null` clears the imageFile (reverts profile to legacy clone reinstall). */
+    imageFile: string | null;
   }>
 ): Promise<HostedOsTemplateRecord | { error: string } | undefined> {
   const docId = id.trim().toLowerCase();
@@ -854,6 +910,23 @@ export async function updateHostedOsTemplate(
     return { error: "Another OS template already uses this Proxmox VMID." };
   }
 
+  let imageFile: string | undefined = curRow.imageFile;
+  let imageFileFieldChanged = false;
+  if (updates.imageFile === null) {
+    imageFile = undefined;
+    imageFileFieldChanged = true;
+  } else if (typeof updates.imageFile === "string") {
+    const trimmed = updates.imageFile.trim();
+    if (trimmed === "") {
+      imageFile = undefined;
+    } else {
+      const validated = validateOsTemplateImageFile(trimmed);
+      if (typeof validated === "object") return { error: validated.error };
+      imageFile = validated;
+    }
+    imageFileFieldChanged = true;
+  }
+
   const merged: HostedOsTemplateRecord = {
     id: docId,
     label,
@@ -861,18 +934,22 @@ export async function updateHostedOsTemplate(
     active,
     sortOrder,
     createdAt: curRow.createdAt,
+    ...(imageFile ? { imageFile } : {}),
   };
 
-  await ref.set(
-    forFirestore({
-      label,
-      templateVmid,
-      active,
-      sortOrder,
-      createdAt: curRow.createdAt,
-    }),
-    { merge: true }
-  );
+  const docPatch: Record<string, unknown> = {
+    label,
+    templateVmid,
+    active,
+    sortOrder,
+    createdAt: curRow.createdAt,
+  };
+  if (imageFileFieldChanged) {
+    // Use FieldValue-style null to actually clear the stored field on merge.
+    docPatch.imageFile = imageFile ?? null;
+  }
+
+  await ref.set(forFirestore(docPatch), { merge: true });
   invalidateHostedOsTemplatesCache();
   return merged;
 }

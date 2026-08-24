@@ -7,6 +7,12 @@ export type TemplateProfileRow = {
   id: string;
   label: string;
   templateVmid: number;
+  /**
+   * Optional cloud image filename (or absolute path). Set to enable the fast
+   * in-place reinstall (`qm importdisk` equivalent) for this profile; leave
+   * empty to use the legacy full-clone reinstall for `templateVmid`.
+   */
+  imageFile?: string;
 };
 
 function newProfileRow(): TemplateProfileRow {
@@ -14,7 +20,7 @@ function newProfileRow(): TemplateProfileRow {
     typeof crypto !== "undefined" && crypto.randomUUID
       ? `img_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`
       : `img_${Date.now()}`;
-  return { id, label: "", templateVmid: 0 };
+  return { id, label: "", templateVmid: 0, imageFile: "" };
 }
 
 /** Admin: edit QEMU clone catalogue for one VPS (`orders.imageProfiles`). */
@@ -47,12 +53,18 @@ export function OrderTemplatesModal(props: {
       const id = row.id.trim();
       const label = row.label.trim();
       const tmpl = Math.floor(Number(row.templateVmid));
-      if (!id && !label && !Number.isFinite(tmpl)) continue;
+      const imageFile = (row.imageFile ?? "").trim();
+      if (!id && !label && !Number.isFinite(tmpl) && !imageFile) continue;
       if (!id || !label || tmpl <= 0) return null;
       if (seenIds.has(id) || seenVmids.has(tmpl)) return null;
       seenIds.add(id);
       seenVmids.add(tmpl);
-      out.push({ id, label, templateVmid: tmpl });
+      out.push({
+        id,
+        label,
+        templateVmid: tmpl,
+        ...(imageFile ? { imageFile } : {}),
+      });
     }
     return out;
   }
@@ -139,6 +151,7 @@ export function OrderTemplatesModal(props: {
                   key={`${row.id}-${idx}`}
                   className="grid gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--card)]/40 p-2 sm:grid-cols-[1fr_1fr_110px_auto]"
                 >
+                  {/* First row: Profile ID / Label / VMID / Remove */}
                   <div>
                     <label className="text-[10px] font-semibold uppercase text-[var(--muted)]">
                       Profile ID
@@ -208,6 +221,24 @@ export function OrderTemplatesModal(props: {
                     >
                       Remove
                     </button>
+                  </div>
+                  <div className="sm:col-span-4">
+                    <label className="text-[10px] font-semibold uppercase text-[var(--muted)]">
+                      Image file (optional — enables in-place reinstall)
+                    </label>
+                    <input
+                      type="text"
+                      value={row.imageFile ?? ""}
+                      onChange={(e) =>
+                        setDraft((prev) =>
+                          prev.map((r, i) =>
+                            i === idx ? { ...r, imageFile: e.target.value } : r
+                          )
+                        )
+                      }
+                      placeholder="ubuntu-26.04-server-cloudimg-amd64.qcow2"
+                      className="mt-0.5 w-full rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-sm"
+                    />
                   </div>
                 </div>
               ))}

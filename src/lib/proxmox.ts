@@ -609,6 +609,332 @@ async function resizeVmDiskAbsolute(
 }
 
 /**
+ * Resolve a user-supplied `imageFile` to a value we can drop into a Proxmox
+ * disk config as `import-from=<ref>`.
+ *
+ * Proxmox refuses arbitrary absolute filesystem paths from anything other
+ * than `root@pam` (`Only root can pass arbitrary filesystem paths`), so the
+ * default behaviour is to reference the file through a Proxmox `import`
+ * content storage instead — this works with API tokens:
+ *
+ *   <storage>:import/<filename>
+ *
+ * Accepted `imageFile` shapes:
+ *   - `ubuntu-26.04-...qcow2`             → `<CLOUD_IMAGE_STORAGE>:import/ubuntu-26.04-...qcow2`
+ *   - `mystorage:import/foo.qcow2`        → passed through unchanged
+ *   - `/cloudimg/foo.qcow2`               → passed through as-is (only works when the API
+ *                                           user is `root@pam`; kept for backwards compatibility)
+ *
+ * `PROXMOX_CLOUD_IMAGE_STORAGE` env sets the storage id (default `cloudimg`).
+ *
+ * On the Proxmox host, once, run something like:
+ *   mkdir -p /cloudimg
+ *   pvesm add dir cloudimg --path /cloudimg --content import
+ */
+export function resolveCloudImageReference(imageFile: string): string {
+  const trimmed = imageFile.trim();
+  if (!trimmed) throw new Error("imageFile is empty");
+  if (trimmed.length > 512) {
+    throw new Error("imageFile path is too long");
+  }
+  if (/[\s"'`;|&$<>*?()\\]/.test(trimmed) || trimmed.includes("..")) {
+    throw new Error("imageFile contains invalid characters");
+  }
+  if (trimmed.startsWith("/")) return trimmed;
+  if (trimmed.includes(":")) return trimmed;
+  const storageRaw =
+    process.env.PROXMOX_CLOUD_IMAGE_STORAGE?.trim() || "cloudimg";
+  return `${storageRaw}:import/${trimmed}`;
+}
+
+function importTaskPollTimeoutMs(): number | null {
+  return parseTimeoutEnv(
+    process.env.PROXMOX_IMPORT_TASK_TIMEOUT_MS,
+    3_600_000 // 1h — Proxmox `import-from` on ZFS/raw can take a few minutes for a 2-3 GB cloud image.
+  );
+}
+
+/**
+ * Detach a guest disk AND destroy its underlying volume via `unlink?force=1`.
+ * Equivalent to the PVE CLI `qm unlink VMID --idlist <disk> --force`.
+ */
+async function unlinkGuestDiskWithStorage(
+  client: AxiosInstance,
+  node: string,
+  vmid: number,
+  diskKey: string
+): Promise<void> {
+  const body = new URLSearchParams();
+  body.set("idlist", diskKey);
+  body.set("force", "1");
+  await client.put(
+    `/nodes/${node}/qemu/${vmid}/unlink`,
+    body.toString(),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
+}
+
+/**
+ * In-place reinstall: keep the same VMID / MAC / IP / cloud-init drive, but
+ * throw away the current OS root disk and replace it with a fresh copy of a
+ * cloud image file that already lives on the Proxmox host.
+ *
+ * Equivalent to running on the PVE host:
+ *   qm stop VMID
+ *   qm set VMID --delete <primaryDiskKey>          # via unlink?force=1
+ *   qm importdisk VMID <image> <storagePool> --format qcow2
+ *   qm set VMID --virtio0 <storagePool>:vm-VMID-disk-N
+ *   qm set VMID --boot order=virtio0
+ *   qm resize VMID virtio0 <targetSizeGb>G
+ *   qm start VMID
+ *
+ * We use the Proxmox HTTPS API `import-from=<absolute-path>` disk parameter,
+ * which is what `qm importdisk` uses under the hood in modern PVE (7.2+), so
+ * no SSH access to the hypervisor is required.
+ *
+ * Extra data disks and the cloud-init CDROM drive are left untouched. The
+ * cloud-init drive is regenerated after the swap so the fresh cloud image
+ * picks up the guest's stored ciuser/cipassword/network/sshkeys on first boot.
+ */
+export async function reinstallVmInPlaceFromImageFile(
+  node: string,
+  vmid: number,
+  imageReference: string,
+  targetSizeGb: number,
+  options?: {
+    /**
+     * Explicit Proxmox storage pool for the imported root disk. When omitted
+     * we inherit the pool of the current primary disk, falling back to the
+     * host-config default (`resolveProxmoxDiskStoragePool()`).
+     */
+    targetStoragePool?: string;
+    /** Start the VM after the reinstall finishes (default true). */
+    startAfter?: boolean;
+    /** Regenerate cloud-init drive after swap (default true). */
+    regenerateCloudInit?: boolean;
+  }
+): Promise<{
+  importedDiskKey: string;
+  /** `null` when the VM had no primary disk left to remove (e.g. retrying after a partially-failed reinstall). */
+  previousDiskKey: string | null;
+  previousSizeGb: number | null;
+  storagePool: string;
+}> {
+  if (!imageReference.trim()) {
+    throw new Error(
+      "reinstallVmInPlaceFromImageFile: imageReference is required"
+    );
+  }
+  if (!Number.isFinite(targetSizeGb) || targetSizeGb <= 0) {
+    throw new Error("reinstallVmInPlaceFromImageFile: targetSizeGb must be > 0");
+  }
+
+  const client = await getProxmoxClient();
+
+  // Force-stop the VM (skip the graceful ACPI shutdown). Reinstall is a
+  // destructive operation the user just confirmed, so we don't wait for the
+  // guest to cooperate — Proxmox's `stop?overrule-shutdown=1` sends the QEMU
+  // kill directly and cancels any pending graceful shutdown task.
+  try {
+    const { data } = await client.get(
+      `/nodes/${node}/qemu/${vmid}/status/current`
+    );
+    const status = normalizeQemuStatusField(data.data?.status);
+    if (status !== "stopped") {
+      await stopVM(node, vmid, { overruleShutdown: true });
+      await waitUntilVmStopped(client, node, vmid);
+    }
+  } catch (err: unknown) {
+    const status = (err as { response?: { status?: number } }).response?.status;
+    // 404 = VM already gone; we cannot continue without a shell.
+    if (status === 404) {
+      throw new Error(
+        `Cannot reinstall in place: VM ${vmid} does not exist on node ${node}.`
+      );
+    }
+    throw err;
+  }
+
+  // Look for a primary boot disk. It's OK if there isn't one — a previous
+  // reinstall attempt may have already unlinked it before failing during the
+  // import step. In that case we just proceed straight to import.
+  const { data: cfgRes } = await client.get(
+    `/nodes/${node}/qemu/${vmid}/config`
+  );
+  const cfg = cfgRes.data as Record<string, unknown>;
+  const previousDiskKey = findPrimaryDiskKey(cfg);
+  const previousDiskRaw =
+    previousDiskKey && typeof cfg[previousDiskKey] === "string"
+      ? (cfg[previousDiskKey] as string)
+      : "";
+  const previousSizeGb = previousDiskRaw ? parseSizeToGb(previousDiskRaw) : null;
+
+  // Storage pool where the *new* root disk gets allocated. Priority:
+  //   1) explicit caller override
+  //   2) same pool the current primary disk lives on (preserve customer's
+  //      chosen tier — SAN vs local SSD etc.)
+  //   3) host-config default (`resolveProxmoxDiskStoragePool`)
+  //
+  // This is the TARGET storage; the SOURCE storage (where the qcow2 file
+  // lives) is embedded in `imageReference` and must be a separate storage
+  // with `content=import`.
+  let storagePool = options?.targetStoragePool?.trim() || "";
+  if (!storagePool) {
+    storagePool =
+      (previousDiskRaw && parseStoragePoolFromDiskValue(previousDiskRaw)) ||
+      (await resolveProxmoxDiskStoragePool());
+  }
+  if (!storagePool) {
+    throw new Error(
+      "reinstallVmInPlaceFromImageFile: could not determine target storage pool"
+    );
+  }
+
+  // Detach + delete the old root volume so `virtio0` is free for the imported
+  // one. Skipped when a prior partial reinstall already removed the disk.
+  if (previousDiskKey) {
+    try {
+      await unlinkGuestDiskWithStorage(client, node, vmid, previousDiskKey);
+    } catch (unlinkErr: unknown) {
+      const status = (unlinkErr as { response?: { status?: number } }).response?.status;
+      // Some older PVE versions expose unlink via POST rather than PUT; retry once.
+      if (status === 405 || status === 501) {
+        const body = new URLSearchParams();
+        body.set("idlist", previousDiskKey);
+        body.set("force", "1");
+        await client.post(
+          `/nodes/${node}/qemu/${vmid}/unlink`,
+          body.toString(),
+          { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+        );
+      } else {
+        throw unlinkErr;
+      }
+    }
+  }
+
+  // Attach virtio0 with `import-from` so Proxmox allocates a new volume on
+  // `storagePool` and copies the cloud image into it. `format=qcow2` matches
+  // the source; storage backends that don't support qcow2 (ZFS, LVM) silently
+  // transcode to their native format.
+  //
+  // NOTE: `imageReference` must NOT be a bare filesystem path when the API
+  // caller isn't `root@pam` — Proxmox blocks that with "Only root can pass
+  // arbitrary filesystem paths". Use `<storage>:import/<filename>` (via
+  // `resolveCloudImageReference`) instead.
+  const importedDiskKey = "virtio0";
+  const diskSpec = `${storagePool}:0,import-from=${imageReference},format=qcow2`;
+  let importRes;
+  try {
+    importRes = await client.post(
+      `/nodes/${node}/qemu/${vmid}/config`,
+      pveFormEncode({ [importedDiskKey]: diskSpec }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+  } catch (importErr) {
+    // Surface Proxmox's real complaint (e.g. "unable to parse zfs volume
+    // name" when PROXMOX_CLOUD_IMAGE_STORAGE points at the wrong storage)
+    // instead of a bare "Request failed with status code 500".
+    throw new Error(
+      `Proxmox refused disk import (${importedDiskKey}=${diskSpec}): ${formatProxmoxApiError(importErr)}`
+    );
+  }
+  const importUpid = importRes.data?.data;
+  if (typeof importUpid === "string" && importUpid.startsWith("UPID:")) {
+    await waitForTask(
+      client,
+      importUpid,
+      node,
+      importTaskPollTimeoutMs(),
+      "disk-import"
+    );
+  }
+
+  // Small settlement pause after the import task completes. Proxmox's
+  // per-VM config file (`/etc/pve/qemu-server/VMID.conf`) is on pmxcfs, a
+  // cluster-synced FS with brief write-lock contention windows. Back-to-back
+  // config POSTs immediately after a task-driven config write occasionally
+  // race and return 500/596. A short sleep here eliminates the flake for
+  // the boot-order / resize / cloud-init writes that follow.
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Force boot from the freshly-imported virtio0 disk (previous config may
+  // still reference the now-gone primary disk key in `boot: order=...`).
+  try {
+    await client.post(
+      `/nodes/${node}/qemu/${vmid}/config`,
+      pveFormEncode({ boot: `order=${importedDiskKey}` }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+  } catch (bootErr) {
+    throw new Error(
+      `Proxmox refused boot-order update after disk import: ${formatProxmoxApiError(bootErr)}`
+    );
+  }
+
+  // Grow the imported disk to the caller's target size. Cloud images are
+  // usually 2-3 GB; the plan size is much larger. Proxmox `resize` only
+  // grows, never shrinks — send a relative delta rounded up to whole MB.
+  const { data: postImportCfgRes } = await client.get(
+    `/nodes/${node}/qemu/${vmid}/config`
+  );
+  const postImportCfg = postImportCfgRes.data as Record<string, unknown>;
+  const postImportRaw =
+    typeof postImportCfg[importedDiskKey] === "string"
+      ? (postImportCfg[importedDiskKey] as string)
+      : "";
+  const currentGb = postImportRaw ? parseSizeToGb(postImportRaw) : null;
+  if (currentGb !== null && targetSizeGb > currentGb + 1e-9) {
+    const deltaGb = targetSizeGb - currentGb;
+    const deltaMb = Math.max(1, Math.ceil(deltaGb * 1024));
+    try {
+      await resizeVmDiskAbsolute(
+        client,
+        node,
+        vmid,
+        importedDiskKey,
+        `+${deltaMb}M`
+      );
+    } catch (resizeErr) {
+      throw new Error(
+        `Proxmox refused disk resize ${importedDiskKey} +${deltaMb}M: ${formatProxmoxApiError(resizeErr)}`
+      );
+    }
+  }
+
+  // Regenerate the cloud-init drive so ciuser/cipassword/network/sshkeys from
+  // the existing VM config get picked up on first boot of the new OS image.
+  if (options?.regenerateCloudInit !== false) {
+    const hasAnyCi =
+      Boolean(postImportCfg.ciuser) ||
+      Boolean(postImportCfg.ipconfig0) ||
+      Boolean(postImportCfg.sshkeys) ||
+      Boolean(postImportCfg.nameserver) ||
+      Boolean(postImportCfg.ipconfig1);
+    if (hasAnyCi) {
+      try {
+        await regenerateCloudInitDrive(client, node, vmid);
+      } catch (ciErr) {
+        throw new Error(
+          `Proxmox refused cloud-init regenerate after disk import: ${formatProxmoxApiError(ciErr)}`
+        );
+      }
+    }
+  }
+
+  if (options?.startAfter !== false) {
+    await startVM(node, vmid);
+  }
+
+  return {
+    importedDiskKey,
+    previousDiskKey,
+    previousSizeGb,
+    storagePool,
+  };
+}
+
+/**
  * Apply plan vCPU, RAM (MB), and root disk size (GB) after a full clone.
  * Stops the VM if it is running, updates config, then grows the primary disk if needed (no shrink).
  * Optional cloud-init user/password requires a template with cloud-init (e.g. nocloud on ide2 scsi).
@@ -788,25 +1114,77 @@ export async function applyServiceHardwareToVM(
   }
 }
 
+/**
+ * `PUT .../cloudinit` rebuilds the guest's cloud-init ISO from the current
+ * VM config (ciuser, cipassword, ipconfig0, sshkeys, nameserver, etc.).
+ *
+ * Two flakiness modes worth handling here:
+ *
+ *   - **Proxmox's `pveproxy` front-end has a fixed 30s response timeout.**
+ *     Cloud-init regeneration is a synchronous operation that reads config,
+ *     builds an ISO, and writes it to storage. On busy hypervisors, slow
+ *     backing storage, or immediately after a disk import task, pveproxy
+ *     sometimes returns `596 Connection timed out` even though the
+ *     underlying `pvesh` call finishes fine. That's an artefact of the
+ *     proxy, not a real failure — a follow-up PUT succeeds instantly.
+ *
+ *   - **Some PVE versions gate this endpoint to PUT only.** POST fallback
+ *     was returning `501 not implemented`, which used to mask the real 596.
+ *
+ * The regen is fully idempotent (same inputs → same ISO), so we retry the
+ * PUT a few times with a small backoff before giving up. POST fallback is
+ * kept for the (rare) older PVE versions that need it.
+ */
 async function regenerateCloudInitDrive(
   client: AxiosInstance,
   node: string,
-  vmid: number
+  vmid: number,
+  options?: { maxAttempts?: number; retryDelayMs?: number }
 ): Promise<void> {
   const path = `/nodes/${node}/qemu/${vmid}/cloudinit`;
   const hdr = {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
   };
-  try {
-    await client.put(path, "", hdr);
-    return;
-  } catch (putErr) {
+  const maxAttempts = Math.max(1, options?.maxAttempts ?? 4);
+  const retryDelayMs = Math.max(0, options?.retryDelayMs ?? 2000);
+
+  let lastPutErr: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await client.post(path, "", hdr);
+      await client.put(path, "", hdr);
+      if (attempt > 1) {
+        console.warn(
+          `[Proxmox] cloud-init regenerate on VM ${vmid} @ ${node} succeeded after ${attempt} attempts`
+        );
+      }
       return;
-    } catch {
-      throw putErr;
+    } catch (putErr) {
+      lastPutErr = putErr;
+      const status = (putErr as { response?: { status?: number } }).response
+        ?.status;
+      // Retry on pveproxy timeouts (596) and other transient 5xx. Don't
+      // retry on 4xx — those mean the request itself is malformed / denied.
+      const retriable = status === 596 || (status !== undefined && status >= 500 && status < 600);
+      if (!retriable || attempt === maxAttempts) break;
+      console.warn(
+        `[Proxmox] cloud-init regenerate on VM ${vmid} @ ${node} attempt ${attempt}/${maxAttempts} returned ${status}; retrying in ${retryDelayMs}ms`
+      );
+      await new Promise((r) => setTimeout(r, retryDelayMs));
     }
+  }
+
+  // Older PVE versions expose the endpoint via POST rather than PUT.
+  try {
+    await client.post(path, "", hdr);
+    return;
+  } catch (postErr) {
+    const postStatus = (postErr as { response?: { status?: number } }).response
+      ?.status;
+    // If POST returned 501 (not implemented) the PUT error is the real one.
+    if (postStatus === 501 || postStatus === 405) {
+      throw lastPutErr;
+    }
+    throw postErr;
   }
 }
 

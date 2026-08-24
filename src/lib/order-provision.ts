@@ -19,6 +19,8 @@ import {
   getVMParsedSpecs,
   haltVmForPlanMaintenance,
   pickBestProvisioningNode,
+  reinstallVmInPlaceFromImageFile,
+  resolveCloudImageReference,
   startVM,
   stopVM,
 } from "@/lib/proxmox";
@@ -417,50 +419,120 @@ function destroyNotFoundOk(err: unknown): boolean {
 }
 
 /**
- * Destroy the current VM, clone a fresh full VM from the chosen catalogue image, then re-apply
- * the same plan (CPU/RAM/disk), cloud-init (credentials, IP, SSH keys), and extra disks.
- * Public IPv4 on the order is kept. Subscriptions are unchanged.
+ * Fast in-place reinstall used when the selected {@link ServiceImageProfile}
+ * has an `imageFile` set. The VMID, MAC, cloud-init drive, NIC, and any extra
+ * data disks are preserved: we just stop the guest, drop the current root
+ * disk, and import the fresh cloud image via the Proxmox HTTPS API's
+ * `import-from` disk parameter (equivalent to `qm importdisk`).
  *
- * Runs in HTTP `after()` (clone can take many minutes). Caller should set provisioning state.
+ * The disk is resized to at least the current disk size (never smaller than
+ * `service.storage`) so previously-grown plans keep their capacity.
  */
-export async function replaceOrderVmFromTemplate(
-  orderId: string,
-  reinstallBody?: ReinstallCloneBody
+async function reinstallOrderInPlaceFromImageFile(
+  order: Order,
+  service: VPSService,
+  reinstallChoice: { profile: ServiceImageProfile; templateVmid: number },
+  imageFile: string
 ): Promise<void> {
-  const order = await getOrder(orderId);
-  if (!order) throw new Error(`Order ${orderId} not found`);
-  if (order.status === "cancelled") {
-    throw new Error("Cannot reinstall a cancelled VPS");
-  }
-  if (!order.vmid || order.vmid <= 0) {
-    throw new Error("No provisioned VM to replace");
-  }
-  if (!order.node || order.node === "pending") {
-    throw new Error("Order has no Proxmox node recorded");
-  }
+  const { node } = await resolveOrderVmLocation(order);
 
-  const service = await getService(order.serviceId);
-  if (!service) throw new Error(`Service ${order.serviceId} not found`);
-
-  const hosted = await readActiveOsTemplateProfiles();
-  const profiles = effectiveTemplatesForOrder(order, service, hosted);
-
-  let reinstallChoiceResolved:
-    | { profile: ServiceImageProfile; templateVmid: number }
-    | null = null;
-  if (profiles.length > 0) {
-    reinstallChoiceResolved = resolveCloneChoiceForReinstall(
-      profiles,
-      order,
-      reinstallBody ?? {}
+  // Read current provisioned disk size before we destroy it so we don't
+  // silently shrink a customer who grew their disk beyond the plan default.
+  let currentDiskGb = 0;
+  try {
+    const parsed = await getVMParsedSpecs(node, order.vmid);
+    currentDiskGb = parsed.disksGb[0] ?? 0;
+  } catch (err) {
+    console.warn(
+      `[reinstallOrderInPlaceFromImageFile] ${order.id}: could not read current disk size; falling back to plan storage:`,
+      err
     );
-    if (!reinstallChoiceResolved) {
-      throw new Error(
-        "Pick a valid operating system image from your plan — that image is not offered for reinstall."
-      );
-    }
+  }
+  const targetSizeGb = Math.max(
+    Math.floor(currentDiskGb) || 0,
+    Math.floor(service.storage) || 0
+  );
+  if (targetSizeGb <= 0) {
+    throw new Error(
+      `Cannot reinstall: unable to determine a valid disk size for order ${order.id}.`
+    );
   }
 
+  const imageRef = resolveCloudImageReference(imageFile);
+  const previousStatus = order.status;
+
+  try {
+    await reinstallVmInPlaceFromImageFile(
+      node,
+      order.vmid,
+      imageRef,
+      targetSizeGb,
+      // Leave the VM stopped after reinstall — matches the existing
+      // post-clone contract where the user starts the VM from the dashboard.
+      { startAfter: false, regenerateCloudInit: true }
+    );
+
+    // Deliberately do NOT call `configureProvisionedVM` here. In the in-place
+    // reinstall path the VM shell is preserved end-to-end: cores, memory,
+    // cloud-init user/password/network/sshkeys, extra data disks, private LAN
+    // NIC, and the subscription all survived the disk swap untouched.
+    //
+    // Running it anyway was causing two problems:
+    //   1. Flakiness — `applyServiceHardwareToVM` stacks 3-6 more Proxmox
+    //      config POSTs on top of the ones the disk import already issued,
+    //      and pmxcfs occasionally returns 500/596 on the trailing writes.
+    //      Users had to click "Retry" to get through the same idempotent
+    //      re-application.
+    //   2. Duplicate extra disks — `applyServiceHardwareToVM` re-attaches
+    //      every `extraDisksGb` on the next free virtio slot rather than
+    //      recognising the existing ones, so each reinstall would silently
+    //      double the customer's data volumes.
+    //
+    // Instead we just record which image was installed and flip the order
+    // status back to whatever it was before the reinstall started.
+    const nextStatus: Order["status"] =
+      previousStatus === "suspended" ? "suspended" : "active";
+    await updateOrder(order.id, {
+      cloneTemplateVmid: reinstallChoice.templateVmid,
+      cloneImageProfileId: reinstallChoice.profile.id,
+      status: nextStatus,
+      provisionError: "",
+    });
+  } catch (err) {
+    const msg = provisionErrorMessage(err);
+    console.error(
+      `[reinstallOrderInPlaceFromImageFile] ${order.id}:`,
+      err
+    );
+    // The VM shell is still there (same VMID / node) — only the disk changed.
+    // Set status=pending + provisionError so the dashboard surfaces the
+    // failure and the user can retry the reinstall without losing the VM.
+    await updateOrder(order.id, {
+      status: "pending",
+      provisionError: msg,
+    });
+    throw err;
+  }
+}
+
+/**
+ * Legacy: destroy the current VM, clone a fresh full VM from the chosen
+ * catalogue image, then re-apply the same plan (CPU/RAM/disk), cloud-init
+ * (credentials, IP, SSH keys), and extra disks. Public IPv4 on the order is
+ * kept. Subscriptions are unchanged.
+ *
+ * Used when the selected profile has no `imageFile` — that is, admins have
+ * not migrated it to the fast in-place reinstall path yet.
+ */
+async function reinstallOrderByFullClone(
+  order: Order,
+  service: VPSService,
+  profiles: ServiceImageProfile[],
+  reinstallChoiceResolved:
+    | { profile: ServiceImageProfile; templateVmid: number }
+    | null
+): Promise<void> {
+  const orderId = order.id;
   const target = await resolveProvisionTarget(
     service,
     reinstallChoiceResolved?.templateVmid ?? null,
@@ -557,7 +629,7 @@ export async function replaceOrderVmFromTemplate(
       });
       return;
     }
-    console.error(`[replaceOrderVmFromTemplate] ${orderId}:`, err);
+    console.error(`[reinstallOrderByFullClone] ${orderId}:`, err);
     await updateOrder(orderId, {
       status: "pending",
       provisionError: msg,
@@ -566,4 +638,71 @@ export async function replaceOrderVmFromTemplate(
     });
     throw err;
   }
+}
+
+/**
+ * Reinstall a VPS from the chosen catalogue image. When the resolved profile
+ * has an `imageFile` set we do a fast in-place disk swap on the existing
+ * VMID (`qm importdisk` style). Otherwise we fall back to the legacy full
+ * clone (destroy → clone from template VMID → reconfigure) so orders whose
+ * admins have not migrated to cloud-image files keep working.
+ *
+ * Runs in HTTP `after()` (clone / import can take several minutes). Caller
+ * should set provisioning state before dispatching.
+ */
+export async function replaceOrderVmFromTemplate(
+  orderId: string,
+  reinstallBody?: ReinstallCloneBody
+): Promise<void> {
+  const order = await getOrder(orderId);
+  if (!order) throw new Error(`Order ${orderId} not found`);
+  if (order.status === "cancelled") {
+    throw new Error("Cannot reinstall a cancelled VPS");
+  }
+  if (!order.vmid || order.vmid <= 0) {
+    throw new Error("No provisioned VM to replace");
+  }
+  if (!order.node || order.node === "pending") {
+    throw new Error("Order has no Proxmox node recorded");
+  }
+
+  const service = await getService(order.serviceId);
+  if (!service) throw new Error(`Service ${order.serviceId} not found`);
+
+  const hosted = await readActiveOsTemplateProfiles();
+  const profiles = effectiveTemplatesForOrder(order, service, hosted);
+
+  let reinstallChoiceResolved:
+    | { profile: ServiceImageProfile; templateVmid: number }
+    | null = null;
+  if (profiles.length > 0) {
+    reinstallChoiceResolved = resolveCloneChoiceForReinstall(
+      profiles,
+      order,
+      reinstallBody ?? {}
+    );
+    if (!reinstallChoiceResolved) {
+      throw new Error(
+        "Pick a valid operating system image from your plan — that image is not offered for reinstall."
+      );
+    }
+  }
+
+  const chosenImageFile = reinstallChoiceResolved?.profile.imageFile?.trim();
+  if (chosenImageFile && reinstallChoiceResolved) {
+    await reinstallOrderInPlaceFromImageFile(
+      order,
+      service,
+      reinstallChoiceResolved,
+      chosenImageFile
+    );
+    return;
+  }
+
+  await reinstallOrderByFullClone(
+    order,
+    service,
+    profiles,
+    reinstallChoiceResolved
+  );
 }
