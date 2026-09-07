@@ -78,7 +78,7 @@ export default function AdminPage() {
     profiles: {
       id: string;
       label: string;
-      templateVmid: number;
+      templateVmid?: number;
       imageFile?: string;
     }[];
     hint?: string;
@@ -647,8 +647,7 @@ export default function AdminPage() {
           Override per VPS with <strong className="font-medium text-[var(--foreground)]">VPS OS templates</strong>.
           Leave that unset to use <strong className="font-medium text-[var(--foreground)]">OS templates (global)</strong>{" "}
           from Firestore, then{" "}
-          <code className="rounded bg-[var(--card)] px-1 font-mono text-[10px]">TEMPLATE_CATALOG_JSON</code>,
-          then legacy catalogue on the SKU.
+          <code className="rounded bg-[var(--card)] px-1 font-mono text-[10px]">TEMPLATE_CATALOG_JSON</code>.
         </p>
         {provisionError && (
           <div className="mt-4 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2 text-sm text-red-400">
@@ -1514,7 +1513,7 @@ export default function AdminPage() {
       <section id="admin-host" className="scroll-mt-28 mt-16">
         <h2 className="text-xl font-semibold">Host configuration</h2>
         <p className="mt-2 max-w-3xl text-sm text-[var(--muted)] leading-relaxed">
-          Global OS templates and Proxmox defaults used when provisioning new VPS guests.
+          Global OS images and Proxmox defaults used when provisioning new VPS guests.
         </p>
         <OsTemplatesAdminPanel embedded />
         <ProxmoxHostConfigPanel embedded />

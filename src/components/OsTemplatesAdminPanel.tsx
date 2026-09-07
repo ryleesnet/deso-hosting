@@ -7,15 +7,10 @@ import { suggestHostedTemplateDocId } from "@/lib/os-template-admin";
 type Row = {
   id: string;
   label: string;
-  templateVmid: number;
+  templateVmid?: number;
   active: boolean;
   sortOrder: number;
   createdAt: string;
-  /**
-   * Cloud-image filename (or absolute path) on the Proxmox host. When set,
-   * reinstall performs an in-place disk swap (`qm importdisk`-style) using
-   * this image instead of full-cloning the template VMID.
-   */
   imageFile?: string;
 };
 
@@ -29,7 +24,6 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
   /** New row draft */
   const [draftId, setDraftId] = useState("");
   const [draftLabel, setDraftLabel] = useState("");
-  const [draftVmid, setDraftVmid] = useState("");
   const [draftSort, setDraftSort] = useState("");
   const [draftImageFile, setDraftImageFile] = useState("");
   const [creating, setCreating] = useState(false);
@@ -64,9 +58,8 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
     setCreating(true);
     setSaveError(null);
     try {
-      const tmpl = draftVmid.trim() ? parseInt(draftVmid, 10) : NaN;
-      if (!Number.isFinite(tmpl) || tmpl <= 0 || !draftLabel.trim()) {
-        setSaveError("Label and template VMID (positive integer) are required.");
+      if (!draftLabel.trim() || !draftImageFile.trim()) {
+        setSaveError("Label and image file are required.");
         return;
       }
       const res = await apiFetch("/api/admin/os-templates", {
@@ -75,19 +68,17 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
         body: JSON.stringify({
           id: draftId.trim() || undefined,
           label: draftLabel.trim(),
-          templateVmid: tmpl,
           active: true,
           sortOrder: draftSort.trim()
             ? Math.floor(parseInt(draftSort, 10))
             : undefined,
-          imageFile: draftImageFile.trim() ? draftImageFile.trim() : undefined,
+          imageFile: draftImageFile.trim(),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Create failed (${res.status})`);
       setDraftId("");
       setDraftLabel("");
-      setDraftVmid("");
       setDraftSort("");
       setDraftImageFile("");
       await load();
@@ -107,12 +98,8 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           label: patch.label,
-          templateVmid: patch.templateVmid,
           active: patch.active,
           sortOrder: patch.sortOrder,
-          // `imageFile` is only forwarded when the row editor explicitly
-          // touched it — undefined leaves the stored value alone, and an
-          // empty string is normalised to `null` so PATCH can clear it.
           ...(patch.imageFile !== undefined
             ? { imageFile: patch.imageFile === "" ? null : patch.imageFile }
             : {}),
@@ -154,25 +141,24 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
         <h3 className="text-sm font-semibold">OS templates (global)</h3>
       )}
       <p className="mt-2 max-w-3xl text-sm text-[var(--muted)] leading-relaxed">
-        Name each Proxmox template guest (clone source VMID). Customers choose one at checkout and
-        when reinstalling. Inactive templates stay off the storefront but remain editable here.
+        Name each cloud image customers can pick at checkout and when reinstalling.
+        Inactive images stay off the storefront but remain editable here.
         Per-VPS overrides are still possible from <strong className="text-[var(--foreground)]">Orders → VPS OS templates</strong>.
       </p>
       <p className="mt-2 max-w-3xl text-xs text-[var(--muted)] leading-relaxed">
         Set an <strong className="text-[var(--foreground)]">Image file</strong> (e.g.{" "}
-        <code className="rounded bg-[var(--background)] px-1">ubuntu-26.04-server-cloudimg-amd64.qcow2</code>)
-        to switch reinstall to the fast in-place disk swap flow ({" "}
-        <code className="rounded bg-[var(--background)] px-1">qm importdisk</code> equivalent, no full clone).
+        <code className="rounded bg-[var(--background)] px-1">ubuntu-26.04-server-cloudimg-amd64.qcow2</code>).
+        New VMs and reinstalls import that qcow2 ({" "}
+        <code className="rounded bg-[var(--background)] px-1">qm importdisk</code>).
         Bare filenames are pulled from the Proxmox <em>import</em> storage named by{" "}
         <code className="rounded bg-[var(--background)] px-1">PROXMOX_CLOUD_IMAGE_STORAGE</code>{" "}
         (default <code className="rounded bg-[var(--background)] px-1">cloudimg</code>) — one-time PVE setup:
         {" "}
         <code className="rounded bg-[var(--background)] px-1">mkdir -p /cloudimg &amp;&amp; pvesm add dir cloudimg --path /cloudimg --content import</code>.
-        Leave blank to keep the legacy full-clone reinstall.
       </p>
 
       <form onSubmit={(e) => void handleCreate(e)} className="mt-6 rounded-2xl border border-[var(--card-border)] bg-[var(--card)]/35 p-4">
-        <h3 className="text-sm font-semibold text-[var(--foreground)]">Add template</h3>
+        <h3 className="text-sm font-semibold text-[var(--foreground)]">Add OS image</h3>
         <p className="mt-1 text-xs text-[var(--muted)]">
           Example label:{" "}
           <code className="rounded bg-[var(--background)] px-1">Ubuntu 26.04 LTS</code> —
@@ -189,19 +175,7 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
               required
             />
           </div>
-          <div className="lg:col-span-3">
-            <label className="text-xs font-medium text-[var(--muted)]">Proxmox template VMID</label>
-            <input
-              type="number"
-              min={1}
-              value={draftVmid}
-              onChange={(e) => setDraftVmid(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm font-mono"
-              placeholder="5001"
-              required
-            />
-          </div>
-          <div className="lg:col-span-3">
+          <div className="lg:col-span-4">
             <label className="text-xs font-medium text-[var(--muted)]">Profile ID (optional)</label>
             <div className="mt-1 flex gap-2">
               <input
@@ -231,13 +205,14 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
           </div>
           <div className="lg:col-span-12">
             <label className="text-xs font-medium text-[var(--muted)]">
-              Image file (optional, enables in-place reinstall)
+              Image file
             </label>
             <input
               value={draftImageFile}
               onChange={(e) => setDraftImageFile(e.target.value)}
               className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 font-mono text-sm"
               placeholder="ubuntu-26.04-server-cloudimg-amd64.qcow2"
+              required
             />
           </div>
         </div>
@@ -247,7 +222,7 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
             disabled={creating}
             className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--background)] hover:bg-[var(--accent-muted)] disabled:opacity-50"
           >
-            {creating ? "Saving…" : "Add OS template"}
+            {creating ? "Saving…" : "Add OS image"}
           </button>
         </div>
       </form>
@@ -264,7 +239,6 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
             <tr>
               <th className="px-3 py-2 text-left font-medium">Active</th>
               <th className="px-3 py-2 text-left font-medium">Label</th>
-              <th className="px-3 py-2 text-left font-medium">VMID</th>
               <th className="px-3 py-2 text-left font-medium">Profile ID</th>
               <th className="px-3 py-2 text-left font-medium">Image file</th>
               <th className="px-3 py-2 text-left font-medium">Sort</th>
@@ -274,14 +248,14 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-[var(--muted)]">
-                  Loading templates…
+                <td colSpan={6} className="px-3 py-8 text-[var(--muted)]">
+                  Loading images…
                 </td>
               </tr>
             ) : templates.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-[var(--muted)]">
-                  No global OS templates yet — add Ubuntu 26.04 LTS (VMID <code className="rounded px-1">5001</code>) above.
+                <td colSpan={6} className="px-3 py-8 text-[var(--muted)]">
+                  No global OS images yet — add Ubuntu 26.04 LTS and its qcow2 filename above.
                 </td>
               </tr>
             ) : (
@@ -315,26 +289,21 @@ function OsTemplateEditableRow(props: {
   // stay within the `react-hooks/set-state-in-effect` lint rule.
   const [rowSnapshot, setRowSnapshot] = useState(row);
   const [label, setLabel] = useState(row.label);
-  const [vmid, setVmid] = useState(String(row.templateVmid));
   const [sortOrder, setSortOrder] = useState(String(row.sortOrder));
   const [imageFile, setImageFile] = useState(row.imageFile ?? "");
   if (rowSnapshot !== row) {
     setRowSnapshot(row);
     setLabel(row.label);
-    setVmid(String(row.templateVmid));
     setSortOrder(String(row.sortOrder));
     setImageFile(row.imageFile ?? "");
   }
 
-  const tvm = Math.floor(Number(vmid));
   const sortN = Math.floor(Number(sortOrder) || 0);
   const dirty =
     label.trim() !== row.label.trim() ||
-    tvm !== row.templateVmid ||
     sortN !== row.sortOrder ||
     imageFile.trim() !== (row.imageFile ?? "").trim();
-  const canSave =
-    label.trim().length > 0 && Number.isFinite(tvm) && tvm > 0;
+  const canSave = label.trim().length > 0 && imageFile.trim().length > 0;
 
   return (
     <tr className="border-b border-[var(--card-border)] last:border-0">
@@ -356,23 +325,13 @@ function OsTemplateEditableRow(props: {
           className="w-full max-w-[14rem] rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 text-sm"
         />
       </td>
-      <td className="px-3 py-2 align-middle">
-        <input
-          type="number"
-          min={1}
-          value={vmid}
-          onChange={(e) => setVmid(e.target.value)}
-          disabled={busy}
-          className="w-28 rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 font-mono text-sm"
-        />
-      </td>
       <td className="px-3 py-2 align-middle font-mono text-xs text-[var(--muted)]">{row.id}</td>
       <td className="px-3 py-2 align-middle">
         <input
           value={imageFile}
           onChange={(e) => setImageFile(e.target.value)}
           disabled={busy}
-          placeholder="(clone reinstall)"
+          placeholder="ubuntu-26.04-server-cloudimg-amd64.qcow2"
           className="w-56 rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1 font-mono text-xs"
         />
       </td>
@@ -393,7 +352,6 @@ function OsTemplateEditableRow(props: {
             onClick={() =>
               onPatch({
                 label: label.trim(),
-                templateVmid: tvm,
                 sortOrder: sortN,
                 imageFile: imageFile.trim(),
               })

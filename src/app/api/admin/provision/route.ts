@@ -9,7 +9,8 @@ import {
 } from "@/lib/db";
 import {
   applyServiceHardwareToVM,
-  cloneVM,
+  createVmFromCloudImage,
+  resolveCloudImageReference,
 } from "@/lib/proxmox";
 import { fetchDesoUsernameByPublicKey } from "@/lib/deso-profile";
 import { vmCredentialsFromDesoLogin } from "@/lib/vm-credentials";
@@ -22,7 +23,7 @@ import {
 import { updatePublicIpMachineForOrder } from "@/lib/public-ip-store";
 import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
 import { requireAdmin } from "@/lib/api-auth";
-import { effectiveTemplatesForOrder, profileByTemplateVmidInList } from "@/lib/image-profiles";
+import { effectiveTemplatesForOrder, profileByIdInList } from "@/lib/image-profiles";
 import { resolveVmDisplayName } from "@/lib/vm-name";
 
 export async function POST(req: NextRequest) {
@@ -48,23 +49,10 @@ export async function POST(req: NextRequest) {
     const profiles = service
       ? effectiveTemplatesForOrder(order, service, hosted)
       : [];
-    const fromStored =
-      typeof order.cloneTemplateVmid === "number" &&
-      order.cloneTemplateVmid > 0
-        ? profileByTemplateVmidInList(profiles, order.cloneTemplateVmid)
-            ?.templateVmid
-        : undefined;
-    const templateVmid =
-      fromStored ??
-      profiles[0]?.templateVmid ??
-      (service != null &&
-      service.proxmoxTemplate != null &&
-      service.proxmoxTemplate > 0
-        ? service.proxmoxTemplate
-        : undefined) ??
-      (typeof order.cloneTemplateVmid === "number" && order.cloneTemplateVmid > 0
-        ? order.cloneTemplateVmid
-        : undefined);
+    const chosenProfile =
+      profileByIdInList(profiles, order.cloneImageProfileId) ??
+      profiles[0];
+    const imageFile = chosenProfile?.imageFile?.trim();
     const templateNode = service?.proxmoxNode || node;
 
     let vmLoginUsername = order.vmLoginUsername;
@@ -82,68 +70,74 @@ export async function POST(req: NextRequest) {
 
     let publicIpv4ToSave: string | undefined = order.publicIpv4;
 
-    if (templateVmid && templateNode) {
+    if (imageFile && service) {
       try {
         const vmName = resolveVmDisplayName(orderId, order.vmDisplayName);
-        await cloneVM(templateNode, templateVmid, vmid, vmName, true);
-        if (service) {
-          if (await isPublicIpPoolConfigured() && !publicIpv4ToSave) {
-            try {
-              publicIpv4ToSave = await allocatePublicIpForOrder({
-                userId: order.userId,
-                orderId: order.id,
-                vmid,
-                node,
-              });
-            } catch (allocErr) {
-              console.error("Public IP allocation failed:", allocErr);
-              return NextResponse.json(
-                {
-                  error: "No free public IPv4 address in pool",
-                  details:
-                    allocErr instanceof Error
-                      ? allocErr.message
-                      : String(allocErr),
-                },
-                { status: 503 }
-              );
-            }
-          }
-
-          const ns = await getPublicIpNameserverParam();
-          const network = publicIpv4ToSave
-            ? await cloudInitNetworkForIp(publicIpv4ToSave)
-            : undefined;
-          await applyServiceHardwareToVM(
-            templateNode,
-            vmid,
-            {
-              vcpu: service.vcpu,
-              ramMb: service.ram,
-              storageGb: service.storage,
-            },
-            {
-              cloudInit: {
-                ciuser: vmLoginUsername,
-                cipassword: vmLoginPassword,
-                ...(network ? { network } : {}),
-                ...(ns ? { nameserver: ns } : {}),
-                ...(order.cloudInitSshKeys?.trim()
-                  ? { sshkeys: order.cloudInitSshKeys.trim() }
-                  : {}),
+        const guestNode = node || templateNode;
+        await createVmFromCloudImage(
+          guestNode,
+          vmid,
+          vmName,
+          resolveCloudImageReference(imageFile),
+          Math.floor(service.storage) || 0,
+          { vcpu: service.vcpu, ramMb: service.ram }
+        );
+        if (await isPublicIpPoolConfigured() && !publicIpv4ToSave) {
+          try {
+            publicIpv4ToSave = await allocatePublicIpForOrder({
+              userId: order.userId,
+              orderId: order.id,
+              vmid,
+              node: guestNode,
+            });
+          } catch (allocErr) {
+            console.error("Public IP allocation failed:", allocErr);
+            return NextResponse.json(
+              {
+                error: "No free public IPv4 address in pool",
+                details:
+                  allocErr instanceof Error
+                    ? allocErr.message
+                    : String(allocErr),
               },
-              ...(order.extraDisksGb?.length
-                ? { extraDisksGb: order.extraDisksGb }
-                : {}),
-            }
-          );
+              { status: 503 }
+            );
+          }
         }
-      } catch (cloneErr) {
-        console.error("Proxmox clone failed:", cloneErr);
+
+        const ns = await getPublicIpNameserverParam();
+        const network = publicIpv4ToSave
+          ? await cloudInitNetworkForIp(publicIpv4ToSave)
+          : undefined;
+        await applyServiceHardwareToVM(
+          guestNode,
+          vmid,
+          {
+            vcpu: service.vcpu,
+            ramMb: service.ram,
+            storageGb: service.storage,
+          },
+          {
+            cloudInit: {
+              ciuser: vmLoginUsername,
+              cipassword: vmLoginPassword,
+              ...(network ? { network } : {}),
+              ...(ns ? { nameserver: ns } : {}),
+              ...(order.cloudInitSshKeys?.trim()
+                ? { sshkeys: order.cloudInitSshKeys.trim() }
+                : {}),
+            },
+            ...(order.extraDisksGb?.length
+              ? { extraDisksGb: order.extraDisksGb }
+              : {}),
+          }
+        );
+      } catch (createErr) {
+        console.error("Proxmox create/import failed:", createErr);
         return NextResponse.json(
           {
             error: "Failed to create VM in Proxmox",
-            details: cloneErr instanceof Error ? cloneErr.message : "Unknown error",
+            details: createErr instanceof Error ? createErr.message : "Unknown error",
           },
           { status: 500 }
         );

@@ -22,19 +22,6 @@ export async function PATCH(
     };
     const updates: Parameters<typeof updateHostedOsTemplate>[1] = {};
     if (typeof body.label === "string") updates.label = body.label;
-    if (body.templateVmid != null) {
-      const t =
-        typeof body.templateVmid === "number"
-          ? body.templateVmid
-          : parseInt(String(body.templateVmid), 10);
-      if (!Number.isFinite(t) || t <= 0) {
-        return NextResponse.json(
-          { error: "templateVmid must be a positive integer" },
-          { status: 400 }
-        );
-      }
-      updates.templateVmid = Math.floor(t);
-    }
     if (typeof body.active === "boolean") updates.active = body.active;
     if (body.sortOrder != null)
       updates.sortOrder = Number.isFinite(Number(body.sortOrder))

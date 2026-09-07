@@ -6,12 +6,7 @@ import { apiFetch } from "@/lib/api-client";
 export type TemplateProfileRow = {
   id: string;
   label: string;
-  templateVmid: number;
-  /**
-   * Optional cloud image filename (or absolute path). Set to enable the fast
-   * in-place reinstall (`qm importdisk` equivalent) for this profile; leave
-   * empty to use the legacy full-clone reinstall for `templateVmid`.
-   */
+  templateVmid?: number;
   imageFile?: string;
 };
 
@@ -20,7 +15,7 @@ function newProfileRow(): TemplateProfileRow {
     typeof crypto !== "undefined" && crypto.randomUUID
       ? `img_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`
       : `img_${Date.now()}`;
-  return { id, label: "", templateVmid: 0, imageFile: "" };
+  return { id, label: "", imageFile: "" };
 }
 
 /** Admin: edit QEMU clone catalogue for one VPS (`orders.imageProfiles`). */
@@ -48,22 +43,18 @@ export function OrderTemplatesModal(props: {
   function buildValidatedProfilesPayload(): TemplateProfileRow[] | null {
     const out: TemplateProfileRow[] = [];
     const seenIds = new Set<string>();
-    const seenVmids = new Set<number>();
     for (const row of draft) {
       const id = row.id.trim();
       const label = row.label.trim();
-      const tmpl = Math.floor(Number(row.templateVmid));
       const imageFile = (row.imageFile ?? "").trim();
-      if (!id && !label && !Number.isFinite(tmpl) && !imageFile) continue;
-      if (!id || !label || tmpl <= 0) return null;
-      if (seenIds.has(id) || seenVmids.has(tmpl)) return null;
+      if (!id && !label && !imageFile) continue;
+      if (!id || !label || !imageFile) return null;
+      if (seenIds.has(id)) return null;
       seenIds.add(id);
-      seenVmids.add(tmpl);
       out.push({
         id,
         label,
-        templateVmid: tmpl,
-        ...(imageFile ? { imageFile } : {}),
+        imageFile,
       });
     }
     return out;
@@ -76,7 +67,7 @@ export function OrderTemplatesModal(props: {
       const validated = buildValidatedProfilesPayload();
       if (validated === null) {
         setError(
-          "Complete each row with a unique Profile ID (start with a letter), a label, and a unique template VMID — or remove incomplete rows."
+          "Complete each row with a unique Profile ID (start with a letter), a label, and an image file — or remove incomplete rows."
         );
         return;
       }
@@ -149,7 +140,7 @@ export function OrderTemplatesModal(props: {
               {draft.map((row, idx) => (
                 <div
                   key={`${row.id}-${idx}`}
-                  className="grid gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--card)]/40 p-2 sm:grid-cols-[1fr_1fr_110px_auto]"
+                  className="grid gap-2 rounded-lg border border-[var(--card-border)] bg-[var(--card)]/40 p-2 sm:grid-cols-[1fr_1fr_auto]"
                 >
                   {/* First row: Profile ID / Label / VMID / Remove */}
                   <div>
@@ -186,31 +177,6 @@ export function OrderTemplatesModal(props: {
                       className="mt-0.5 w-full rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 text-sm"
                     />
                   </div>
-                  <div>
-                    <label className="text-[10px] font-semibold uppercase text-[var(--muted)]">
-                      Template VMID
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      value={
-                        row.templateVmid > 0 ? String(row.templateVmid) : ""
-                      }
-                      onChange={(e) =>
-                        setDraft((prev) =>
-                          prev.map((r, i) =>
-                            i === idx
-                              ? {
-                                  ...r,
-                                  templateVmid: parseInt(e.target.value, 10) || 0,
-                                }
-                              : r
-                          )
-                        )
-                      }
-                      className="mt-0.5 w-full rounded border border-[var(--card-border)] bg-[var(--background)] px-2 py-1.5 font-mono text-sm"
-                    />
-                  </div>
                   <div className="flex items-end justify-end">
                     <button
                       type="button"
@@ -222,9 +188,9 @@ export function OrderTemplatesModal(props: {
                       Remove
                     </button>
                   </div>
-                  <div className="sm:col-span-4">
+                  <div className="sm:col-span-3">
                     <label className="text-[10px] font-semibold uppercase text-[var(--muted)]">
-                      Image file (optional — enables in-place reinstall)
+                      Image file
                     </label>
                     <input
                       type="text"

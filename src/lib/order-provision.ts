@@ -12,23 +12,23 @@ import {
 } from "@/lib/db";
 import {
   applyServiceHardwareToVM,
-  cloneVM,
+  createVmFromCloudImage,
   destroyVM,
   getNextVMID,
-  getVMStatus,
   getVMParsedSpecs,
   haltVmForPlanMaintenance,
   pickBestProvisioningNode,
   reinstallVmInPlaceFromImageFile,
   resolveCloudImageReference,
   startVM,
-  stopVM,
 } from "@/lib/proxmox";
 import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 import { getProxmoxHostConfig } from "@/lib/proxmox-host-config";
 import {
+  allocatePublicIpForOrder,
   cloudInitNetworkForIp,
   getPublicIpNameserverParam,
+  isPublicIpPoolConfigured,
 } from "@/lib/public-ip-pool";
 import { updatePublicIpMachineForOrder } from "@/lib/public-ip-store";
 import { monthlyAmountNanosForOrder } from "@/lib/service-pricing";
@@ -36,67 +36,39 @@ import { privateLanPrefixLen } from "@/lib/private-user-lan";
 import {
   resolveCloneChoiceForReinstall,
   effectiveTemplatesForOrder,
-  profileByTemplateVmidInList,
+  profileByIdInList,
   type ReinstallCloneBody,
 } from "@/lib/image-profiles";
 import { resolveVmDisplayName } from "@/lib/vm-name";
 
 /**
- * Resolve the Proxmox node + template VMID used to clone a guest for an order.
- * When `templateCatalog` is non-empty it drives which VMIDs are acceptable;
- * otherwise `service.proxmoxTemplate` and env `PROXMOX_DEFAULT_TEMPLATE_VMID`
- * remain the fallback (`templateCatalog` is usually from `effectiveTemplatesForOrder`).
+ * Resolve the Proxmox node used to create a guest for an order.
+ * Auto-provision requires a node plus at least one OS image (`imageFile`) in
+ * the catalogue.
  */
 export async function resolveProvisionTarget(
   service: VPSService,
-  cloneTemplatePreferred: number | null | undefined,
-  templateCatalog: ServiceImageProfile[]
-): Promise<{
-  node: string;
-  templateVmid: number;
-} | null> {
+  imageCatalog: ServiceImageProfile[]
+): Promise<{ node: string } | null> {
   const hostCfg = await getProxmoxHostConfig();
   const envNode = process.env.PROXMOX_DEFAULT_NODE?.trim() || "";
-  const envTemplateRaw =
-    process.env.PROXMOX_DEFAULT_TEMPLATE_VMID?.trim() || "";
-  const envTemplate = parseInt(envTemplateRaw, 10);
 
   const node =
     service.proxmoxNode?.trim() ||
     hostCfg.effectiveDefaultCloneNode ||
     envNode;
 
-  let templateVmid = 0;
-  const profiles = templateCatalog;
-  const pref =
-    cloneTemplatePreferred != null &&
-    Number.isFinite(cloneTemplatePreferred) &&
-    cloneTemplatePreferred > 0
-      ? Math.floor(Number(cloneTemplatePreferred))
-      : null;
+  const hasImage = imageCatalog.some((p) => Boolean(p.imageFile?.trim()));
 
-  if (profiles.length > 0) {
-    const hit =
-      pref != null ? profiles.find((p) => p.templateVmid === pref) : null;
-    templateVmid = hit ? hit.templateVmid : profiles[0]!.templateVmid;
-  } else if (service.proxmoxTemplate != null && service.proxmoxTemplate > 0) {
-    templateVmid = service.proxmoxTemplate;
-  } else if (
-    Number.isFinite(envTemplate) &&
-    envTemplate > 0
-  ) {
-    templateVmid = envTemplate;
-  }
-
-  if (!node || templateVmid <= 0) {
+  if (!node || !hasImage) {
     console.warn(
       `[provision] cannot auto-provision service ${service.id}: ` +
-        `node=${node || "(missing)"} template=${templateVmid || "(missing)"}. ` +
-        `Set OS templates per order, TEMPLATE_CATALOG_JSON / legacy imageProfiles on services, proxmoxTemplate, or PROXMOX_DEFAULT_* in env.`
+        `node=${node || "(missing)"} images=${hasImage ? "ok" : "(missing)"}. ` +
+        `Set OS images (image file) in Admin, per-order overrides, or TEMPLATE_CATALOG_JSON, and PROXMOX_DEFAULT_NODE.`
     );
     return null;
   }
-  return { node, templateVmid };
+  return { node };
 }
 
 /** Stringify a thrown value for storage on the order so the user/admin can see what failed. */
@@ -385,45 +357,164 @@ export async function configureProvisionedVM(orderId: string): Promise<void> {
   }
 }
 
-const VM_STOP_WAIT_MS = 120_000;
-
-async function stopVmGracefully(node: string, vmid: number): Promise<void> {
-  try {
-    const s = await getVMStatus(node, vmid);
-    if (s.status === "stopped") return;
-    if (s.status === "running" || s.status === "paused") {
-      await stopVM(node, vmid);
-    }
-  } catch {
-    return;
-  }
-  const deadline = Date.now() + VM_STOP_WAIT_MS;
-  while (Date.now() < deadline) {
-    try {
-      const s = await getVMStatus(node, vmid);
-      if (s.status === "stopped") return;
-    } catch {
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  await stopVM(node, vmid, { overruleShutdown: true });
-  await new Promise((r) => setTimeout(r, 2000));
-}
-
-function destroyNotFoundOk(err: unknown): boolean {
-  const status = (err as { response?: { status?: number } })?.response?.status;
-  if (status === 404) return true;
-  const msg = err instanceof Error ? err.message : String(err);
-  return /404|does not exist|no such vm/i.test(msg);
+function resolveImageFileForProvision(
+  order: Order,
+  profiles: ServiceImageProfile[]
+): { imageFile: string; profile?: ServiceImageProfile } | null {
+  const byId = profileByIdInList(profiles, order.cloneImageProfileId);
+  const chosen = byId ?? profiles.find((p) => p.imageFile?.trim()) ?? null;
+  const imageFile = chosen?.imageFile?.trim();
+  if (!imageFile) return null;
+  return { imageFile, profile: chosen ?? undefined };
 }
 
 /**
- * Fast in-place reinstall used when the selected {@link ServiceImageProfile}
- * has an `imageFile` set. The VMID, MAC, cloud-init drive, NIC, and any extra
- * data disks are preserved: we just stop the guest, drop the current root
- * disk, and import the fresh cloud image via the Proxmox HTTPS API's
- * `import-from` disk parameter (equivalent to `qm importdisk`).
+ * Background provisioner used by DeSo checkout (`/api/orders/create`) and
+ * PayPal capture. Creates a new QEMU guest and imports the cloud image from
+ * `cloudimg:import/...` (same as reinstall).
+ *
+ * Idempotent against a second call: bails out unless the order is still
+ * `provisioning` with `vmid === 0`.
+ */
+export async function finalizeOrderProvision(orderId: string): Promise<void> {
+  const order = await getOrder(orderId);
+  if (!order || order.vmid !== 0 || order.status !== "provisioning") return;
+
+  const service = await getService(order.serviceId);
+  if (!service) {
+    await updateOrder(orderId, { status: "pending" });
+    return;
+  }
+  const hostedProfiles = await readActiveOsTemplateProfiles();
+  const profilesForCatalog = effectiveTemplatesForOrder(
+    order,
+    service,
+    hostedProfiles
+  );
+  const target = await resolveProvisionTarget(service, profilesForCatalog);
+  if (!target) {
+    await updateOrder(orderId, { status: "pending" });
+    return;
+  }
+  const provisionNode = target.node;
+  const imageChoice = resolveImageFileForProvision(order, profilesForCatalog);
+  if (!imageChoice) {
+    await updateOrder(orderId, {
+      status: "pending",
+      provisionError:
+        "No OS image file is configured. Add an image file on the OS catalogue in Admin.",
+    });
+    return;
+  }
+  const imageFileRef = imageChoice.imageFile;
+
+  let newVmid = 0;
+  let targetNode = provisionNode;
+  let publicIpv4: string | undefined = order.publicIpv4;
+
+  try {
+    newVmid = await getNextVMID();
+    const vmName = resolveVmDisplayName(orderId, order.vmDisplayName);
+    const ramMb = service.ram;
+    const vcpu = service.vcpu;
+    const storageGb = Math.floor(service.storage) || 0;
+    if (storageGb <= 0) {
+      throw new Error(
+        `Cannot provision: plan storage is invalid (${storageGb} GB).`
+      );
+    }
+
+    targetNode = await pickBestProvisioningNode(provisionNode, {
+      ramMb,
+      vcpu,
+    });
+
+    async function provisionGuestOnNode(onNode: string) {
+      await createVmFromCloudImage(
+        onNode,
+        newVmid,
+        vmName,
+        resolveCloudImageReference(imageFileRef),
+        storageGb,
+        { vcpu, ramMb }
+      );
+    }
+
+    try {
+      await provisionGuestOnNode(targetNode);
+    } catch (firstErr) {
+      if (targetNode !== provisionNode) {
+        console.warn(
+          "[provision] create on target node failed; retrying on default node:",
+          firstErr
+        );
+        try {
+          await destroyVM(targetNode, newVmid);
+        } catch {
+          /* createVmFromCloudImage already destroys on failure */
+        }
+        targetNode = provisionNode;
+        await provisionGuestOnNode(provisionNode);
+      } else {
+        throw firstErr;
+      }
+    }
+  } catch (createErr) {
+    console.error("Background provision failed during create/import:", createErr);
+    const msg = provisionErrorMessage(createErr);
+    if (/Proxmox (disk-import|qemu-create) task timed out/i.test(msg)) {
+      console.warn(
+        `${orderId}: Proxmox task poll ended before PVE finished (VM may still be creating). Leaving order provisioning — raise PROXMOX_IMPORT_TASK_TIMEOUT_MS or set to 0 for no limit.`
+      );
+      return;
+    }
+    await updateOrder(orderId, { status: "pending", provisionError: msg });
+    return;
+  }
+
+  await updateOrder(orderId, {
+    vmid: newVmid,
+    node: targetNode,
+    ...(imageChoice.profile
+      ? { cloneImageProfileId: imageChoice.profile.id }
+      : {}),
+  });
+
+  if (await isPublicIpPoolConfigured()) {
+    try {
+      if (!publicIpv4) {
+        publicIpv4 = await allocatePublicIpForOrder({
+          userId: order.userId,
+          orderId: order.id,
+          vmid: newVmid,
+          node: targetNode,
+        });
+        await updateOrder(orderId, { publicIpv4 });
+      }
+    } catch (allocErr) {
+      console.error("Public IP allocation failed:", allocErr);
+      await updateOrder(orderId, {
+        status: "pending",
+        provisionError: provisionErrorMessage(allocErr),
+      });
+      return;
+    }
+  }
+
+  try {
+    await configureProvisionedVM(orderId);
+  } catch (configureErr) {
+    console.error("Background provision failed during configure:", configureErr);
+    await updateOrder(orderId, {
+      status: "pending",
+      provisionError: provisionErrorMessage(configureErr),
+    });
+  }
+}
+
+/**
+ * Fast in-place reinstall: keep VMID / MAC / cloud-init / extra disks, swap the
+ * root disk for a fresh import of the chosen cloud image (`qm importdisk`).
  *
  * The disk is resized to at least the current disk size (never smaller than
  * `service.storage`) so previously-grown plans keep their capacity.
@@ -431,13 +522,11 @@ function destroyNotFoundOk(err: unknown): boolean {
 async function reinstallOrderInPlaceFromImageFile(
   order: Order,
   service: VPSService,
-  reinstallChoice: { profile: ServiceImageProfile; templateVmid: number },
+  reinstallChoice: { profile: ServiceImageProfile },
   imageFile: string
 ): Promise<void> {
   const { node } = await resolveOrderVmLocation(order);
 
-  // Read current provisioned disk size before we destroy it so we don't
-  // silently shrink a customer who grew their disk beyond the plan default.
   let currentDiskGb = 0;
   try {
     const parsed = await getVMParsedSpecs(node, order.vmid);
@@ -467,33 +556,12 @@ async function reinstallOrderInPlaceFromImageFile(
       order.vmid,
       imageRef,
       targetSizeGb,
-      // Leave the VM stopped after reinstall — matches the existing
-      // post-clone contract where the user starts the VM from the dashboard.
       { startAfter: false, regenerateCloudInit: true }
     );
 
-    // Deliberately do NOT call `configureProvisionedVM` here. In the in-place
-    // reinstall path the VM shell is preserved end-to-end: cores, memory,
-    // cloud-init user/password/network/sshkeys, extra data disks, private LAN
-    // NIC, and the subscription all survived the disk swap untouched.
-    //
-    // Running it anyway was causing two problems:
-    //   1. Flakiness — `applyServiceHardwareToVM` stacks 3-6 more Proxmox
-    //      config POSTs on top of the ones the disk import already issued,
-    //      and pmxcfs occasionally returns 500/596 on the trailing writes.
-    //      Users had to click "Retry" to get through the same idempotent
-    //      re-application.
-    //   2. Duplicate extra disks — `applyServiceHardwareToVM` re-attaches
-    //      every `extraDisksGb` on the next free virtio slot rather than
-    //      recognising the existing ones, so each reinstall would silently
-    //      double the customer's data volumes.
-    //
-    // Instead we just record which image was installed and flip the order
-    // status back to whatever it was before the reinstall started.
     const nextStatus: Order["status"] =
       previousStatus === "suspended" ? "suspended" : "active";
     await updateOrder(order.id, {
-      cloneTemplateVmid: reinstallChoice.templateVmid,
       cloneImageProfileId: reinstallChoice.profile.id,
       status: nextStatus,
       provisionError: "",
@@ -504,9 +572,6 @@ async function reinstallOrderInPlaceFromImageFile(
       `[reinstallOrderInPlaceFromImageFile] ${order.id}:`,
       err
     );
-    // The VM shell is still there (same VMID / node) — only the disk changed.
-    // Set status=pending + provisionError so the dashboard surfaces the
-    // failure and the user can retry the reinstall without losing the VM.
     await updateOrder(order.id, {
       status: "pending",
       provisionError: msg,
@@ -516,139 +581,8 @@ async function reinstallOrderInPlaceFromImageFile(
 }
 
 /**
- * Legacy: destroy the current VM, clone a fresh full VM from the chosen
- * catalogue image, then re-apply the same plan (CPU/RAM/disk), cloud-init
- * (credentials, IP, SSH keys), and extra disks. Public IPv4 on the order is
- * kept. Subscriptions are unchanged.
- *
- * Used when the selected profile has no `imageFile` — that is, admins have
- * not migrated it to the fast in-place reinstall path yet.
- */
-async function reinstallOrderByFullClone(
-  order: Order,
-  service: VPSService,
-  profiles: ServiceImageProfile[],
-  reinstallChoiceResolved:
-    | { profile: ServiceImageProfile; templateVmid: number }
-    | null
-): Promise<void> {
-  const orderId = order.id;
-  const target = await resolveProvisionTarget(
-    service,
-    reinstallChoiceResolved?.templateVmid ?? null,
-    profiles
-  );
-  if (!target) {
-    throw new Error(
-      "Provisioning target not configured (set VPS OS templates / TEMPLATE_CATALOG_JSON / legacy service fields / env defaults)."
-    );
-  }
-  const cloneProfileStored =
-    reinstallChoiceResolved?.profile.id ??
-    profileByTemplateVmidInList(profiles, target.templateVmid)?.id;
-
-  const previousStatus = order.status;
-  // The current VM may live on a different node than `order.node` if it was
-  // migrated in Proxmox. Resolve before stop/destroy so we don't send those
-  // commands to an empty host (which would 404 and abort the reinstall).
-  const { node: oldNode } = await resolveOrderVmLocation(order);
-  const provisionNode = target.node;
-  const provisionTemplateVmid = target.templateVmid;
-
-  try {
-    await stopVmGracefully(oldNode, order.vmid);
-
-    try {
-      await destroyVM(oldNode, order.vmid);
-    } catch (destroyErr) {
-      if (!destroyNotFoundOk(destroyErr)) {
-        throw destroyErr;
-      }
-    }
-
-    const newVmid = await getNextVMID();
-    const vmName = resolveVmDisplayName(orderId, order.vmDisplayName);
-    let targetNode = await pickBestProvisioningNode(provisionNode, {
-      ramMb: service.ram,
-      vcpu: service.vcpu,
-    });
-
-    async function runClone(withTarget?: string) {
-      await cloneVM(
-        provisionNode,
-        provisionTemplateVmid,
-        newVmid,
-        vmName,
-        true,
-        withTarget && withTarget !== provisionNode
-          ? { target: withTarget }
-          : undefined
-      );
-    }
-
-    try {
-      await runClone(targetNode);
-    } catch (firstErr) {
-      if (targetNode !== provisionNode) {
-        console.warn(
-          "[reinstall] clone with target node failed; retrying on template node:",
-          firstErr
-        );
-        targetNode = provisionNode;
-        await runClone(undefined);
-      } else {
-        throw firstErr;
-      }
-    }
-
-    await updateOrder(orderId, {
-      vmid: newVmid,
-      node: targetNode,
-      cloneTemplateVmid: provisionTemplateVmid,
-      ...(cloneProfileStored !== undefined ? { cloneImageProfileId: cloneProfileStored } : {}),
-    });
-
-    await configureProvisionedVM(orderId);
-
-    if (previousStatus === "suspended") {
-      await updateOrder(orderId, { status: "suspended" });
-    }
-  } catch (err) {
-    const msg = provisionErrorMessage(err);
-    if (/Proxmox clone task timed out/i.test(msg)) {
-      console.warn(
-        `${orderId}: reinstall clone task poll ended before PVE finished (VM may still be cloning).`
-      );
-      await updateOrder(orderId, {
-        status: "pending",
-        provisionError:
-          msg +
-          " If a VM appears in Proxmox shortly, contact support to link it to your order.",
-        vmid: 0,
-        node: provisionNode,
-      });
-      return;
-    }
-    console.error(`[reinstallOrderByFullClone] ${orderId}:`, err);
-    await updateOrder(orderId, {
-      status: "pending",
-      provisionError: msg,
-      vmid: 0,
-      node: provisionNode,
-    });
-    throw err;
-  }
-}
-
-/**
- * Reinstall a VPS from the chosen catalogue image. When the resolved profile
- * has an `imageFile` set we do a fast in-place disk swap on the existing
- * VMID (`qm importdisk` style). Otherwise we fall back to the legacy full
- * clone (destroy → clone from template VMID → reconfigure) so orders whose
- * admins have not migrated to cloud-image files keep working.
- *
- * Runs in HTTP `after()` (clone / import can take several minutes). Caller
- * should set provisioning state before dispatching.
+ * Reinstall a VPS by importing the chosen catalogue cloud image onto the
+ * existing VMID (`qm importdisk` style). Runs in HTTP `after()`.
  */
 export async function replaceOrderVmFromTemplate(
   orderId: string,
@@ -671,38 +605,35 @@ export async function replaceOrderVmFromTemplate(
 
   const hosted = await readActiveOsTemplateProfiles();
   const profiles = effectiveTemplatesForOrder(order, service, hosted);
-
-  let reinstallChoiceResolved:
-    | { profile: ServiceImageProfile; templateVmid: number }
-    | null = null;
-  if (profiles.length > 0) {
-    reinstallChoiceResolved = resolveCloneChoiceForReinstall(
-      profiles,
-      order,
-      reinstallBody ?? {}
+  if (profiles.length === 0) {
+    throw new Error(
+      "No OS images are configured. Add an image file on the OS catalogue in Admin."
     );
-    if (!reinstallChoiceResolved) {
-      throw new Error(
-        "Pick a valid operating system image from your plan — that image is not offered for reinstall."
-      );
-    }
   }
 
-  const chosenImageFile = reinstallChoiceResolved?.profile.imageFile?.trim();
-  if (chosenImageFile && reinstallChoiceResolved) {
-    await reinstallOrderInPlaceFromImageFile(
-      order,
-      service,
-      reinstallChoiceResolved,
-      chosenImageFile
+  const reinstallChoiceResolved = resolveCloneChoiceForReinstall(
+    profiles,
+    order,
+    reinstallBody ?? {}
+  );
+  if (!reinstallChoiceResolved) {
+    throw new Error(
+      "Pick a valid operating system image from your plan — that image is not offered for reinstall."
     );
-    return;
   }
 
-  await reinstallOrderByFullClone(
+  const chosenImageFile = reinstallChoiceResolved.profile.imageFile?.trim();
+  if (!chosenImageFile) {
+    throw new Error(
+      `OS image “${reinstallChoiceResolved.profile.label}” has no image file configured.`
+    );
+  }
+
+  await reinstallOrderInPlaceFromImageFile(
     order,
     service,
-    profiles,
-    reinstallChoiceResolved
+    reinstallChoiceResolved,
+    chosenImageFile
   );
 }
+

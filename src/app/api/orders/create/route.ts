@@ -1,23 +1,12 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import {
   getService,
-  getOrder,
   addOrder,
-  updateOrder,
   readActiveOsTemplateProfiles,
 } from "@/lib/db";
-import {
-  cloneVM,
-  getNextVMID,
-  pickBestProvisioningNode,
-} from "@/lib/proxmox";
 import { fetchDesoUsernameByPublicKey } from "@/lib/deso-profile";
 import { vmCredentialsFromDesoLogin } from "@/lib/vm-credentials";
 import { normalizeTieredExtraDisksGb } from "@/lib/extra-disks";
-import {
-  allocatePublicIpForOrder,
-  isPublicIpPoolConfigured,
-} from "@/lib/public-ip-pool";
 import {
   parseSshAuthFromBody,
   normalizeAndValidateSshPublicKeysInput,
@@ -25,146 +14,17 @@ import {
   sshKeyCommentForDesoUser,
 } from "@/lib/ssh-keys";
 import {
-  configureProvisionedVM,
-  provisionErrorMessage,
+  finalizeOrderProvision,
   resolveProvisionTarget,
 } from "@/lib/order-provision";
 import {
   resolveCloneChoiceFromBody,
   effectiveTemplatesForCheckout,
-  effectiveTemplatesForOrder,
-  profileByTemplateVmidInList,
 } from "@/lib/image-profiles";
 import { requireUser } from "@/lib/api-auth";
 import { ORDER_TERMS_REVISION } from "@/lib/terms-revision";
 import { getProxmoxHostConfig } from "@/lib/proxmox-host-config";
-import {
-  resolveVmDisplayName,
-  validateVmDisplayName,
-} from "@/lib/vm-name";
-
-/** Clone + resize + subscribe after HTTP response returns (dashboard can poll provisioning → active). */
-async function finalizeProvision(orderId: string) {
-  const order = await getOrder(orderId);
-  if (!order || order.vmid !== 0 || order.status !== "provisioning") return;
-
-  const service = await getService(order.serviceId);
-  if (!service) {
-    await updateOrder(orderId, { status: "pending" });
-    return;
-  }
-  const hostedProfiles = await readActiveOsTemplateProfiles();
-  const target = await resolveProvisionTarget(
-    service,
-    order.cloneTemplateVmid ?? null,
-    effectiveTemplatesForOrder(order, service, hostedProfiles)
-  );
-  if (!target) {
-    await updateOrder(orderId, { status: "pending" });
-    return;
-  }
-  const provisionNode = target.node;
-  const provisionTemplateVmid = target.templateVmid;
-
-  let newVmid = 0;
-  let targetNode = provisionNode;
-  let publicIpv4: string | undefined = order.publicIpv4;
-
-  try {
-    newVmid = await getNextVMID();
-    const vmName = resolveVmDisplayName(orderId, order.vmDisplayName);
-
-    targetNode = await pickBestProvisioningNode(provisionNode, {
-      ramMb: service.ram,
-      vcpu: service.vcpu,
-    });
-
-    async function runClone(withTarget?: string) {
-      await cloneVM(
-        provisionNode,
-        provisionTemplateVmid,
-        newVmid,
-        vmName,
-        true,
-        withTarget && withTarget !== provisionNode
-          ? { target: withTarget }
-          : undefined
-      );
-    }
-
-    try {
-      await runClone(targetNode);
-    } catch (firstErr) {
-      if (targetNode !== provisionNode) {
-        console.warn(
-          "[provision] clone with target node failed; retrying on template node:",
-          firstErr
-        );
-        targetNode = provisionNode;
-        await runClone(undefined);
-      } else {
-        throw firstErr;
-      }
-    }
-  } catch (cloneErr) {
-    console.error("Background provision failed during clone:", cloneErr);
-    const msg = provisionErrorMessage(cloneErr);
-    if (/Proxmox clone task timed out/i.test(msg)) {
-      console.warn(
-        `${orderId}: clone task poll ended before PVE finished (VM may still be cloning). Leaving order provisioning — raise PROXMOX_CLONE_TASK_TIMEOUT_MS or set to 0 for no limit.`
-      );
-      return;
-    }
-    await updateOrder(orderId, { status: "pending", provisionError: msg });
-    return;
-  }
-
-  // Clone succeeded — record the VM on the order *before* configuring it so that any
-  // subsequent failure does not orphan the VM in PVE; the user can retry from the dashboard.
-  const profilesForCatalog = effectiveTemplatesForOrder(
-    order,
-    service,
-    hostedProfiles
-  );
-  const cloneMeta = profileByTemplateVmidInList(profilesForCatalog, provisionTemplateVmid);
-  await updateOrder(orderId, {
-    vmid: newVmid,
-    node: targetNode,
-    cloneTemplateVmid: provisionTemplateVmid,
-    ...(cloneMeta ? { cloneImageProfileId: cloneMeta.id } : {}),
-  });
-
-  if (await isPublicIpPoolConfigured()) {
-    try {
-      if (!publicIpv4) {
-        publicIpv4 = await allocatePublicIpForOrder({
-          userId: order.userId,
-          orderId: order.id,
-          vmid: newVmid,
-          node: targetNode,
-        });
-        await updateOrder(orderId, { publicIpv4 });
-      }
-    } catch (allocErr) {
-      console.error("Public IP allocation failed:", allocErr);
-      await updateOrder(orderId, {
-        status: "pending",
-        provisionError: provisionErrorMessage(allocErr),
-      });
-      return;
-    }
-  }
-
-  try {
-    await configureProvisionedVM(orderId);
-  } catch (configureErr) {
-    console.error("Background provision failed during configure:", configureErr);
-    await updateOrder(orderId, {
-      status: "pending",
-      provisionError: provisionErrorMessage(configureErr),
-    });
-  }
-}
+import { validateVmDisplayName } from "@/lib/vm-name";
 
 export async function POST(req: NextRequest) {
   try {
@@ -254,10 +114,8 @@ export async function POST(req: NextRequest) {
     const hosted = await readActiveOsTemplateProfiles();
     const profilesList = effectiveTemplatesForCheckout(service, hosted);
     const cloneExtras: {
-      cloneTemplateVmid?: number;
       cloneImageProfileId?: string;
     } = {};
-    let cloneTemplatePrefer: number | null = null;
     if (profilesList.length > 0) {
       const clonePick = resolveCloneChoiceFromBody(
         profilesList,
@@ -266,20 +124,14 @@ export async function POST(req: NextRequest) {
       );
       if (!clonePick) {
         return NextResponse.json(
-          { error: "Invalid operating system template for this host." },
+          { error: "Invalid operating system image for this host." },
           { status: 400 }
         );
       }
-      cloneExtras.cloneTemplateVmid = clonePick.templateVmid;
       cloneExtras.cloneImageProfileId = clonePick.profile.id;
-      cloneTemplatePrefer = clonePick.templateVmid;
     }
 
-    const target = await resolveProvisionTarget(
-      service,
-      cloneTemplatePrefer ?? null,
-      profilesList
-    );
+    const target = await resolveProvisionTarget(service, profilesList);
 
     let desoHandle: string | undefined =
       typeof desoUsername === "string" && desoUsername.trim()
@@ -355,7 +207,7 @@ export async function POST(req: NextRequest) {
       });
 
       after(() => {
-        finalizeProvision(order.id).catch((e) =>
+        finalizeOrderProvision(order.id).catch((e) =>
           console.error("finalizeProvision:", e)
         );
       });

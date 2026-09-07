@@ -177,8 +177,8 @@ export function ServiceForm({
               placeholder="pve"
             />
             <p className="mt-1 text-xs text-[var(--muted)] leading-relaxed">
-              Default placement for VMs on this SKU. QEMU OS templates live on individual orders —
-              Admin → Orders → <strong>VPS OS templates</strong> — not on catalogue plans anymore.
+              Default placement for VMs on this SKU. OS images live on the global catalogue —
+              Admin → <strong>OS templates</strong> — and can be overridden per order.
               Host-wide options use <code className="rounded bg-[var(--background)] px-1 text-[10px]">TEMPLATE_CATALOG_JSON</code>;{" "}
               <code className="rounded bg-[var(--background)] px-1 text-[10px]">PROXMOX_DEFAULT_*</code> stays the last-resort fallback.
             </p>

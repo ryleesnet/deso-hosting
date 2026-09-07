@@ -57,7 +57,7 @@ type OrderService = {
   pricePreviewNanos?: number;
   desoRateSource?: string;
   proxmoxTemplate?: number;
-  imageProfiles?: { id: string; label: string; templateVmid: number }[];
+  imageProfiles?: { id: string; label: string; templateVmid?: number; imageFile?: string }[];
 };
 
 function parseEnvInt(raw: string | undefined, fallback: number): number {
@@ -121,7 +121,7 @@ export default function OrderPage() {
   const [selectedImageProfileId, setSelectedImageProfileId] = useState("");
   /** Global catalogue from `/api/os-templates` (Firestore). */
   const [hostedProfiles, setHostedProfiles] = useState<
-    { id: string; label: string; templateVmid: number }[]
+    { id: string; label: string; templateVmid?: number; imageFile?: string }[]
   >([]);
 
   const imageProfilesCatalog = useMemo(
@@ -136,7 +136,7 @@ export default function OrderPage() {
       .then((d) =>
         setHostedProfiles(
           Array.isArray((d as { profiles?: unknown }).profiles)
-            ? (d as { profiles: { id: string; label: string; templateVmid: number }[] })
+            ? (d as { profiles: { id: string; label: string; templateVmid?: number; imageFile?: string }[] })
                 .profiles
             : []
         )

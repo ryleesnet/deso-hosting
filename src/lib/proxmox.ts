@@ -379,13 +379,6 @@ function parseTimeoutEnv(
   return n;
 }
 
-function cloneTaskPollTimeoutMs(): number | null {
-  return parseTimeoutEnv(
-    process.env.PROXMOX_CLONE_TASK_TIMEOUT_MS,
-    7_200_000 // 2h — full clones often exceed 2 minutes
-  );
-}
-
 function vmStopWaitTimeoutMs(): number | null {
   return parseTimeoutEnv(process.env.PROXMOX_VM_STOP_TIMEOUT_MS, 900_000); // 15 min
 }
@@ -413,6 +406,74 @@ export function findPrimaryDiskKey(cfg: Record<string, unknown>): string | null 
 
   candidates.sort((a, b) => a.order - b.order);
   return candidates[0]?.key ?? null;
+}
+
+const DEFAULT_CICUSTOM = "vendor=local:snippets/vendor.yaml";
+/** QEMU CPU model for new guests (`qm set VMID --cpu ...`). Default kvm64 is too old for modern distros. */
+const DEFAULT_CPU_TYPE = "x86-64-v2-AES";
+
+/**
+ * Proxmox `cicustom` snippet (equivalent to `qm set VMID --cicustom "..."`).
+ * Override with `PROXMOX_CICUSTOM`. Set the env var to empty to skip.
+ */
+function resolveCicustomVendor(): string | null {
+  const raw = process.env.PROXMOX_CICUSTOM;
+  if (raw != null) {
+    const trimmed = raw.trim();
+    return trimmed ? trimmed : null;
+  }
+  return DEFAULT_CICUSTOM;
+}
+
+function resolvePublicNetBridge(): string {
+  return (
+    process.env.PROXMOX_PUBLIC_BRIDGE?.trim() ||
+    process.env.PROXMOX_PRIVATE_LAN_BRIDGE?.trim() ||
+    "vmbr0"
+  );
+}
+
+function findCloudInitDriveKey(cfg: Record<string, unknown>): string | null {
+  for (const [key, raw] of Object.entries(cfg)) {
+    if (!DISK_BUS_KEY.test(key)) continue;
+    if (typeof raw !== "string") continue;
+    if (/cloudinit/i.test(raw)) return key;
+  }
+  return null;
+}
+
+function pickCloudInitDriveSlot(cfg: Record<string, unknown>): string {
+  const preferred = ["ide2", "ide0", "ide1", "ide3", "sata0", "sata1"];
+  for (const slot of preferred) {
+    if (cfg[slot] == null) return slot;
+  }
+  for (let i = 0; i < 4; i++) {
+    const slot = `ide${i}`;
+    if (cfg[slot] == null) return slot;
+  }
+  throw new Error("No free IDE/SATA slot for the cloud-init CD-ROM drive");
+}
+
+async function ensureCloudInitDrive(
+  client: AxiosInstance,
+  node: string,
+  vmid: number,
+  cfg: Record<string, unknown>
+): Promise<void> {
+  if (findCloudInitDriveKey(cfg)) return;
+  const pool = await resolveProxmoxDiskStoragePool();
+  const slot = pickCloudInitDriveSlot(cfg);
+  try {
+    await client.post(
+      `/nodes/${node}/qemu/${vmid}/config`,
+      pveFormEncode({ [slot]: `${pool}:cloudinit` }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+  } catch (err) {
+    throw new Error(
+      `Proxmox refused to attach cloud-init drive (${slot}=${pool}:cloudinit): ${formatProxmoxApiError(err)}`
+    );
+  }
 }
 
 /** First volume segment `pool:...` from a qemu disk line (not import-from / paths). */
@@ -860,10 +921,16 @@ export async function reinstallVmInPlaceFromImageFile(
 
   // Force boot from the freshly-imported virtio0 disk (previous config may
   // still reference the now-gone primary disk key in `boot: order=...`).
+  // Also pin `cicustom` here so reimaged guests pick up vendor.yaml.
+  const cicustom = resolveCicustomVendor();
+  const bootParams: Record<string, string> = {
+    boot: `order=${importedDiskKey}`,
+  };
+  if (cicustom) bootParams.cicustom = cicustom;
   try {
     await client.post(
       `/nodes/${node}/qemu/${vmid}/config`,
-      pveFormEncode({ boot: `order=${importedDiskKey}` }),
+      pveFormEncode(bootParams),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
   } catch (bootErr) {
@@ -910,9 +977,13 @@ export async function reinstallVmInPlaceFromImageFile(
       Boolean(postImportCfg.ipconfig0) ||
       Boolean(postImportCfg.sshkeys) ||
       Boolean(postImportCfg.nameserver) ||
-      Boolean(postImportCfg.ipconfig1);
+      Boolean(postImportCfg.ipconfig1) ||
+      Boolean(cicustom) ||
+      Boolean(postImportCfg.cicustom) ||
+      Boolean(findCloudInitDriveKey(postImportCfg));
     if (hasAnyCi) {
       try {
+        await ensureCloudInitDrive(client, node, vmid, postImportCfg);
         await regenerateCloudInitDrive(client, node, vmid);
       } catch (ciErr) {
         throw new Error(
@@ -935,10 +1006,127 @@ export async function reinstallVmInPlaceFromImageFile(
 }
 
 /**
- * Apply plan vCPU, RAM (MB), and root disk size (GB) after a full clone.
+ * Create a new (empty) QEMU guest with a cloud-init CD-ROM, public NIC, and
+ * `cicustom` vendor snippet — equivalent to:
+ *   qm create VMID --name ... --memory ... --cores ... --net0 virtio,bridge=...
+ *   qm set VMID --ide2 <storage>:cloudinit --citype nocloud
+ *   qm set VMID --cicustom "vendor=local:snippets/vendor.yaml"
+ *
+ * The root disk is not attached here; {@link createVmFromCloudImage} imports it
+ * afterwards with the same `import-from` path as in-place reinstall.
+ */
+async function createEmptyCloudInitVm(
+  node: string,
+  vmid: number,
+  name: string,
+  specs: { vcpu: number; ramMb: number },
+  options?: { storagePool?: string; netBridge?: string }
+): Promise<void> {
+  const client = await getProxmoxClient();
+  const storagePool =
+    options?.storagePool?.trim() || (await resolveProxmoxDiskStoragePool());
+  const bridge = options?.netBridge?.trim() || resolvePublicNetBridge();
+  const cicustom = resolveCicustomVendor();
+
+  const params: Record<string, string> = {
+    vmid: String(vmid),
+    name,
+    cores: String(Math.max(1, Math.floor(specs.vcpu))),
+    sockets: "1",
+    memory: String(Math.max(32, Math.floor(specs.ramMb))),
+    cpu: DEFAULT_CPU_TYPE,
+    ostype: "l26",
+    scsihw: "virtio-scsi-pci",
+    agent: "enabled=1",
+    net0: `virtio,bridge=${bridge}`,
+    ide2: `${storagePool}:cloudinit`,
+    citype: "nocloud",
+    boot: "order=virtio0",
+  };
+  if (cicustom) params.cicustom = cicustom;
+
+  try {
+    const res = await client.post(
+      `/nodes/${node}/qemu`,
+      pveFormEncode(params),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+    const upid = res.data?.data;
+    if (typeof upid === "string" && upid.startsWith("UPID:")) {
+      await waitForTask(
+        client,
+        upid,
+        node,
+        hardwareTaskPollTimeoutMs(),
+        "qemu-create"
+      );
+    }
+  } catch (err) {
+    throw new Error(
+      `Proxmox refused to create VM ${vmid} on ${node}: ${formatProxmoxApiError(err)}`
+    );
+  }
+}
+
+/**
+ * Provision a new guest without cloning a template VM: create the QEMU shell,
+ * then import the cloud image from `cloudimg:import/...` exactly like
+ * {@link reinstallVmInPlaceFromImageFile}.
+ *
+ * The VM is left stopped so the caller can apply cloud-init user/password/
+ * network/sshkeys and extra disks (see {@link applyServiceHardwareToVM}).
+ */
+export async function createVmFromCloudImage(
+  node: string,
+  vmid: number,
+  name: string,
+  imageReference: string,
+  targetSizeGb: number,
+  specs: { vcpu: number; ramMb: number },
+  options?: { targetStoragePool?: string }
+): Promise<void> {
+  if (!imageReference.trim()) {
+    throw new Error("createVmFromCloudImage: imageReference is required");
+  }
+  if (!Number.isFinite(targetSizeGb) || targetSizeGb <= 0) {
+    throw new Error("createVmFromCloudImage: targetSizeGb must be > 0");
+  }
+
+  const storagePool =
+    options?.targetStoragePool?.trim() ||
+    (await resolveProxmoxDiskStoragePool());
+
+  try {
+    await createEmptyCloudInitVm(node, vmid, name, specs, { storagePool });
+    await reinstallVmInPlaceFromImageFile(
+      node,
+      vmid,
+      imageReference,
+      targetSizeGb,
+      {
+        targetStoragePool: storagePool,
+        startAfter: false,
+        regenerateCloudInit: true,
+      }
+    );
+  } catch (err) {
+    try {
+      await destroyVM(node, vmid);
+    } catch (destroyErr) {
+      console.warn(
+        `[Proxmox] createVmFromCloudImage: failed and cleanup destroy of VM ${vmid} on ${node} also failed:`,
+        destroyErr
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Apply plan vCPU, RAM (MB), and root disk size (GB) after a cloud-image create.
  * Stops the VM if it is running, updates config, then grows the primary disk if needed (no shrink).
- * Optional cloud-init user/password requires a template with cloud-init (e.g. nocloud on ide2 scsi).
- * Optional cloud-init `network` sets Proxmox `ipconfig0` (static IP + gateway) for the guest.
+ * Optional cloud-init user/password/network/sshkeys plus `cicustom` vendor
+ * snippet and a cloud-init CD-ROM (`ide2` by default).
  * Optional extraDisksGb: additional virtio/scsi volumes on the primary disk storage pool after root resize.
  */
 export async function applyServiceHardwareToVM(
@@ -1016,7 +1204,16 @@ export async function applyServiceHardwareToVM(
     cores: String(Math.max(1, Math.floor(specs.vcpu))),
     sockets: "1",
     memory: String(Math.max(32, Math.floor(specs.ramMb))),
+    cpu: DEFAULT_CPU_TYPE,
+    citype: "nocloud",
   };
+
+  const cicustom = resolveCicustomVendor();
+  if (cicustom) configParams.cicustom = cicustom;
+
+  if (typeof cfg.net0 !== "string" || !cfg.net0.trim()) {
+    configParams.net0 = `virtio,bridge=${resolvePublicNetBridge()}`;
+  }
 
   const ci = options?.cloudInit;
   if (ci?.ciuser && ci.cipassword) {
@@ -1108,8 +1305,18 @@ export async function applyServiceHardwareToVM(
     Boolean(ci?.ciuser && ci?.cipassword) ||
     Boolean(ci?.network?.ip) ||
     Boolean(ci?.sshkeys?.trim()) ||
-    Boolean(options?.privateLan?.ip?.trim());
+    Boolean(options?.privateLan?.ip?.trim()) ||
+    Boolean(cicustom);
   if (needCiDrive) {
+    const { data: cfgForCiRes } = await client.get(
+      `/nodes/${node}/qemu/${vmid}/config`
+    );
+    await ensureCloudInitDrive(
+      client,
+      node,
+      vmid,
+      cfgForCiRes.data as Record<string, unknown>
+    );
     await regenerateCloudInitDrive(client, node, vmid);
   }
 }
@@ -1781,69 +1988,6 @@ export async function getNextVMID(): Promise<number> {
     ? Math.max(...resources.map((r) => r.vmid))
     : 99;
   return maxId + 1;
-}
-
-/** Clone VM from template. Returns new VMID when task completes. */
-export async function cloneVM(
-  node: string,
-  templateVmid: number,
-  newVmid: number,
-  name?: string,
-  fullClone = true,
-  options?: { target?: string; storage?: string }
-): Promise<number> {
-  const client = await getProxmoxClient();
-  const params = new URLSearchParams();
-  params.set("newid", String(newVmid));
-  params.set("full", fullClone ? "1" : "0");
-  if (name) params.set("name", name);
-  if (fullClone) {
-    params.set(
-      "storage",
-      options?.storage?.trim() || (await resolveProxmoxDiskStoragePool())
-    );
-  }
-  const target = options?.target?.trim();
-  if (target && target !== node) {
-    params.set("target", target);
-  }
-
-  // Proxmox requires x-www-form-urlencoded; JSON body returns 501
-  const bodyString = params.toString();
-  const url = `${BASE_URL}/nodes/${node}/qemu/${templateVmid}/clone`;
-  console.log("[Proxmox] POST", url);
-  console.log("[Proxmox] Request body:", bodyString);
-
-  let res;
-  try {
-    res = await client.post(
-      `/nodes/${node}/qemu/${templateVmid}/clone`,
-      bodyString,
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-      }
-    );
-  } catch (err: unknown) {
-    const axiosErr = err as { response?: { status: number; data: unknown } };
-    console.log("[Proxmox] Response status:", axiosErr.response?.status ?? "N/A");
-    console.log("[Proxmox] Response data:", JSON.stringify(axiosErr.response?.data ?? err, null, 2));
-    throw err;
-  }
-
-  console.log("[Proxmox] Response status:", res.status);
-  console.log("[Proxmox] Response data:", JSON.stringify(res.data, null, 2));
-
-  const upid = res.data.data;
-  await waitForTask(
-    client,
-    upid,
-    node,
-    cloneTaskPollTimeoutMs(),
-    "clone"
-  );
-  return newVmid;
 }
 
 async function waitForTask(

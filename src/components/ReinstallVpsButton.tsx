@@ -7,7 +7,7 @@ import { apiFetch } from "@/lib/api-client";
 export type ClientImageProfile = {
   id: string;
   label: string;
-  templateVmid: number;
+  templateVmid?: number;
 };
 
 type Props = {
@@ -132,11 +132,12 @@ export function ReinstallVpsButton({
           >
             This will{" "}
             <span className="font-medium text-[var(--foreground)]">
-              permanently delete the current VM
+              replace the operating system disk
             </span>{" "}
-            and clone a fresh one with the same plan resources, public IP, and login settings.{" "}
+            with a fresh cloud image. Plan resources, public IP, extra data disks, and login
+            settings are kept.{" "}
             <span className="font-medium text-[var(--foreground)]">
-              All data on the current disk will be lost.
+              All data on the current OS disk will be lost.
             </span>{" "}
             The process can take several minutes.
           </p>

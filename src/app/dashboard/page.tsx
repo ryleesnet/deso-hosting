@@ -50,7 +50,7 @@ interface Order {
   cloudInitSshKeys?: string;
   cloneTemplateVmid?: number;
   cloneImageProfileId?: string;
-  imageProfiles?: { id: string; label: string; templateVmid: number }[];
+  imageProfiles?: { id: string; label: string; templateVmid?: number; imageFile?: string }[];
   privateLanEnabled?: boolean;
   privateLanVlan?: number;
   privateLanIp?: string;
@@ -68,13 +68,14 @@ interface Service {
   pricePreviewNanos?: number;
   priceNanos?: number;
   proxmoxTemplate?: number;
-  imageProfiles?: { id: string; label: string; templateVmid: number }[];
+  imageProfiles?: { id: string; label: string; templateVmid?: number; imageFile?: string }[];
 }
 
 type HostedCatalogProfile = {
   id: string;
   label: string;
-  templateVmid: number;
+  templateVmid?: number;
+  imageFile?: string;
 };
 
 function DashboardSection({

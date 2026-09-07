@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
         ? tvmid
         : tvmid != null
           ? parseInt(String(tvmid), 10)
-          : NaN;
+          : undefined;
     let id =
       typeof body.id === "string" && body.id.trim()
         ? body.id.trim().toLowerCase()
@@ -53,10 +53,12 @@ export async function POST(req: NextRequest) {
     const tryCreate = await createHostedOsTemplate({
       id,
       label,
-      templateVmid,
       active,
       sortOrder,
       imageFile,
+      ...(typeof templateVmid === "number" && Number.isFinite(templateVmid)
+        ? { templateVmid }
+        : {}),
     });
     if ("error" in tryCreate) {
       if (
@@ -67,10 +69,12 @@ export async function POST(req: NextRequest) {
         const retry = await createHostedOsTemplate({
           id,
           label,
-          templateVmid,
           active,
           sortOrder,
           imageFile,
+          ...(typeof templateVmid === "number" && Number.isFinite(templateVmid)
+            ? { templateVmid }
+            : {}),
         });
         if ("error" in retry) {
           return NextResponse.json({ error: retry.error }, { status: 400 });

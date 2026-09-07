@@ -8,9 +8,8 @@ import {
 import { requireUser } from "@/lib/api-auth";
 
 /**
- * User/admin: destroy the current QEMU guest, full-clone again from the selected catalogue image
- * profile (when configured), then re-apply hardware + cloud-init (same plan, IP, credentials,
- * extra disks). Runs in the background like initial provisioning (clone can take many minutes).
+ * User/admin: replace the OS disk from the selected catalogue cloud image
+ * (in-place import). Runs in the background like initial provisioning.
  */
 export async function POST(
   req: NextRequest,
@@ -71,11 +70,11 @@ export async function POST(
 
     const hostedProfiles = await readActiveOsTemplateProfiles();
     const templates = effectiveTemplatesForOrder(order, service, hostedProfiles);
-    if (!(await resolveProvisionTarget(service, null, templates))) {
+    if (!(await resolveProvisionTarget(service, templates))) {
       return NextResponse.json(
         {
           error:
-            "Reinstall is not configured — add active OS templates in Admin, configure this order, set TEMPLATE_CATALOG_JSON / legacy catalogue, or PROXMOX_* env defaults.",
+            "Reinstall is not configured — add OS images (image file) in Admin, configure this order, or set TEMPLATE_CATALOG_JSON.",
         },
         { status: 400 }
       );
