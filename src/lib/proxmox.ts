@@ -433,6 +433,32 @@ function resolvePublicNetBridge(): string {
   );
 }
 
+/** VLAN tag on the public NIC (`net0`). Default 888. Set `PROXMOX_PUBLIC_VLAN_TAG=0` to omit. */
+function resolvePublicVlanTag(): number | null {
+  const raw = process.env.PROXMOX_PUBLIC_VLAN_TAG;
+  if (raw != null) {
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === "0") return null;
+    const n = parseInt(trimmed, 10);
+    if (!Number.isInteger(n) || n < 1 || n > 4094) {
+      throw new Error(
+        `PROXMOX_PUBLIC_VLAN_TAG must be 1–4094 or 0 to disable (got ${JSON.stringify(raw)})`
+      );
+    }
+    return n;
+  }
+  return 888;
+}
+
+/** Proxmox `net0` value: virtio on the public bridge, optionally VLAN-tagged. */
+function resolvePublicNet0(bridgeOverride?: string): string {
+  const bridge = bridgeOverride?.trim() || resolvePublicNetBridge();
+  const tag = resolvePublicVlanTag();
+  return tag != null
+    ? `virtio,bridge=${bridge},tag=${tag}`
+    : `virtio,bridge=${bridge}`;
+}
+
 function findCloudInitDriveKey(cfg: Record<string, unknown>): string | null {
   for (const [key, raw] of Object.entries(cfg)) {
     if (!DISK_BUS_KEY.test(key)) continue;
@@ -1008,7 +1034,7 @@ export async function reinstallVmInPlaceFromImageFile(
 /**
  * Create a new (empty) QEMU guest with a cloud-init CD-ROM, public NIC, and
  * `cicustom` vendor snippet — equivalent to:
- *   qm create VMID --name ... --memory ... --cores ... --net0 virtio,bridge=...
+ *   qm create VMID --name ... --memory ... --cores ... --net0 virtio,bridge=...,tag=888
  *   qm set VMID --ide2 <storage>:cloudinit --citype nocloud
  *   qm set VMID --cicustom "vendor=local:snippets/vendor.yaml"
  *
@@ -1025,7 +1051,6 @@ async function createEmptyCloudInitVm(
   const client = await getProxmoxClient();
   const storagePool =
     options?.storagePool?.trim() || (await resolveProxmoxDiskStoragePool());
-  const bridge = options?.netBridge?.trim() || resolvePublicNetBridge();
   const cicustom = resolveCicustomVendor();
 
   const params: Record<string, string> = {
@@ -1038,7 +1063,7 @@ async function createEmptyCloudInitVm(
     ostype: "l26",
     scsihw: "virtio-scsi-pci",
     agent: "enabled=1",
-    net0: `virtio,bridge=${bridge}`,
+    net0: resolvePublicNet0(options?.netBridge),
     ide2: `${storagePool}:cloudinit`,
     citype: "nocloud",
     boot: "order=virtio0",
@@ -1211,9 +1236,7 @@ export async function applyServiceHardwareToVM(
   const cicustom = resolveCicustomVendor();
   if (cicustom) configParams.cicustom = cicustom;
 
-  if (typeof cfg.net0 !== "string" || !cfg.net0.trim()) {
-    configParams.net0 = `virtio,bridge=${resolvePublicNetBridge()}`;
-  }
+  configParams.net0 = resolvePublicNet0();
 
   const ci = options?.cloudInit;
   if (ci?.ciuser && ci.cipassword) {
