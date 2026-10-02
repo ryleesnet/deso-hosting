@@ -43,6 +43,7 @@ import {
 import { resumeOrderAfterPayment } from "@/lib/order-lifecycle";
 import { getUsdPerDeso } from "@/lib/deso-usd-rate";
 import { usdCentsToNanos } from "@/lib/pricing";
+import { attachOrderLogContext, logWarn } from "@/lib/app-log";
 
 // PayPal webhook payloads occasionally include large stringified data, but
 // we keep them tight in memory by reading once as text.
@@ -55,7 +56,9 @@ async function findOrderBySubscriptionId(
   // and this only runs on webhook — call sites are rare.
   const { getOrders } = await import("@/lib/db");
   const orders = await getOrders();
-  return orders.find((o) => o.paypalSubscriptionId === subscriptionId);
+  const order = orders.find((o) => o.paypalSubscriptionId === subscriptionId);
+  if (order) attachOrderLogContext(order);
+  return order;
 }
 
 export async function POST(req: NextRequest) {
@@ -288,7 +291,14 @@ async function handleSubscriptionFailure(event: PaypalWebhookEvent) {
   if (!subscriptionId) return;
   const order = await findOrderBySubscriptionId(subscriptionId);
   if (!order) return;
+  attachOrderLogContext(order);
   const subscription = await getSubscriptionByOrder(order.id);
   if (!subscription || subscription.status === "cancelled") return;
+  logWarn(
+    "payment",
+    `[paypal webhook] ${event.event_type} for order ${order.id}`,
+    { paypalSubscriptionId: subscriptionId, eventId: event.id },
+    { userId: order.userId, orderId: order.id }
+  );
   await updateSubscription(subscription.id, { status: "past_due" });
 }

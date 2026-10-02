@@ -143,7 +143,6 @@ export function OsTemplatesAdminPanel({ embedded = false }: { embedded?: boolean
       <p className="mt-2 max-w-3xl text-sm text-[var(--muted)] leading-relaxed">
         Name each cloud image customers can pick at checkout and when reinstalling.
         Inactive images stay off the storefront but remain editable here.
-        Per-VPS overrides are still possible from <strong className="text-[var(--foreground)]">Orders → VPS OS templates</strong>.
       </p>
       <p className="mt-2 max-w-3xl text-xs text-[var(--muted)] leading-relaxed">
         Set an <strong className="text-[var(--foreground)]">Image file</strong> (e.g.{" "}

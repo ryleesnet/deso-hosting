@@ -5,11 +5,11 @@ import { useAuth } from "@/contexts/AuthContext";
 import Link from "next/link";
 import { ServiceForm } from "@/components/ServiceForm";
 import { DeleteVpsConfirmationDialog } from "@/components/DeleteVpsConfirmationDialog";
-import { OrderTemplatesModal } from "@/components/OrderTemplatesModal";
 import { OsTemplatesAdminPanel } from "@/components/OsTemplatesAdminPanel";
 import { ProxmoxHostConfigPanel } from "@/components/ProxmoxHostConfigPanel";
 import { AdminSectionNav } from "@/components/AdminSectionNav";
 import { AdminsAdminPanel } from "@/components/AdminsAdminPanel";
+import { AdminLogsPanel } from "@/components/AdminLogsPanel";
 import { formatDesoDisplay } from "@/lib/deso";
 import { formatUsdCents } from "@/lib/pricing";
 import { apiFetch } from "@/lib/api-client";
@@ -72,17 +72,6 @@ export default function AdminPage() {
   const [publicIps, setPublicIps] = useState<PublicIpRecord[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  /** Admin modal: VPS-level OS catalogue (`orders.imageProfiles`). */
-  const [orderTemplatesModal, setOrderTemplatesModal] = useState<null | {
-    orderId: string;
-    profiles: {
-      id: string;
-      label: string;
-      templateVmid?: number;
-      imageFile?: string;
-    }[];
-    hint?: string;
-  }>(null);
   const [loading, setLoading] = useState(true);
   const [editingIp, setEditingIp] = useState<string | null>(null);
   const [ipDraft, setIpDraft] = useState<{
@@ -635,7 +624,7 @@ export default function AdminPage() {
     <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
       <h1 className="text-3xl font-bold">Admin Panel</h1>
       <p className="mt-2 text-[var(--muted)]">
-        Orders, catalogue, host settings, and access control
+        Orders, catalogue, host settings, logs, and access control
       </p>
 
       <AdminSectionNav />
@@ -644,9 +633,8 @@ export default function AdminPage() {
       <section id="admin-orders" className="scroll-mt-28 mt-10">
         <h2 className="text-xl font-semibold">Orders</h2>
         <p className="mt-2 max-w-4xl text-xs text-[var(--muted)] leading-relaxed">
-          Override per VPS with <strong className="font-medium text-[var(--foreground)]">VPS OS templates</strong>.
-          Leave that unset to use <strong className="font-medium text-[var(--foreground)]">OS templates (global)</strong>{" "}
-          from Firestore, then{" "}
+          OS images come from <strong className="font-medium text-[var(--foreground)]">OS templates (global)</strong>{" "}
+          in Firestore, then{" "}
           <code className="rounded bg-[var(--card)] px-1 font-mono text-[10px]">TEMPLATE_CATALOG_JSON</code>.
         </p>
         {provisionError && (
@@ -988,22 +976,6 @@ export default function AdminPage() {
                             : "Refund via PayPal"}
                         </button>
                       ) : null}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const svc = services.find((x) => x.id === o.serviceId);
-                          setOrderTemplatesModal({
-                            orderId: o.id,
-                            profiles: o.imageProfiles ?? [],
-                            hint: svc
-                              ? `Plan SKU: ${svc.name}. Clear all rows & save to inherit host / plan defaults.`
-                              : undefined,
-                          });
-                        }}
-                        className="rounded border border-[var(--card-border)] px-2 py-1 text-xs hover:bg-[var(--card)]"
-                      >
-                        VPS OS templates
-                      </button>
                       {(o.status === "pending" || o.status === "provisioning") && (
                         <div className="flex flex-wrap items-center gap-2">
                           <input
@@ -1930,6 +1902,8 @@ export default function AdminPage() {
         </div>
       </section>
 
+      <AdminLogsPanel />
+
       <AdminsAdminPanel />
 
       {user ? (
@@ -1944,17 +1918,6 @@ export default function AdminPage() {
           onDismiss={() => {
             adminDeleteOrderRef.current = null;
           }}
-        />
-      ) : null}
-
-      {orderTemplatesModal ? (
-        <OrderTemplatesModal
-          open
-          orderId={orderTemplatesModal.orderId}
-          initialProfiles={orderTemplatesModal.profiles}
-          summaryHint={orderTemplatesModal.hint}
-          onSaved={() => loadData()}
-          onClose={() => setOrderTemplatesModal(null)}
         />
       ) : null}
 

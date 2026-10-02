@@ -243,7 +243,7 @@ export async function POST(req: NextRequest) {
       ...orderResponseExtras,
     });
   } catch (err) {
-    console.error(err);
+    console.error("[orders/create]", err);
     return NextResponse.json(
       { error: "Failed to create order" },
       { status: 500 }

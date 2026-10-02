@@ -4,6 +4,7 @@
  */
 
 import { getFirestoreDb } from "@/lib/firebase-admin";
+import { attachOrderLogContext } from "@/lib/app-log";
 import type { PaymentToken } from "@/lib/deso-tokens";
 
 const COL_SERVICES = "services";
@@ -268,7 +269,9 @@ export async function getOrdersByUser(userId: string): Promise<Order[]> {
 export async function getOrder(id: string): Promise<Order | undefined> {
   const doc = await db().collection(COL_ORDERS).doc(id).get();
   if (!doc.exists) return undefined;
-  return { id: doc.id, ...doc.data() } as Order;
+  const order = { id: doc.id, ...doc.data() } as Order;
+  attachOrderLogContext(order);
+  return order;
 }
 
 export async function addOrder(
@@ -283,6 +286,7 @@ export async function addOrder(
     .collection(COL_ORDERS)
     .doc(newOrder.id)
     .set(forFirestore(newOrder));
+  attachOrderLogContext(newOrder);
   return newOrder;
 }
 

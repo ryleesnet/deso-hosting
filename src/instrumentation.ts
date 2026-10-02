@@ -4,6 +4,20 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
+
+  const { installFileLogCapture, pruneExpiredLogFiles, logApp } = await import(
+    "@/lib/app-log"
+  );
+  installFileLogCapture();
+  void pruneExpiredLogFiles().catch(() => {
+    /* ignore */
+  });
+  setInterval(() => {
+    void pruneExpiredLogFiles().catch(() => {
+      /* ignore */
+    });
+  }, 6 * 60 * 60 * 1000);
+
   if (process.env.BILLING_DUNNING_DISABLE === "1") return;
 
   const raw = process.env.BILLING_DUNNING_INTERVAL_MS?.trim();
@@ -14,12 +28,18 @@ export async function register() {
   const { runBillingDunning } = await import("@/lib/order-lifecycle");
 
   void runBillingDunning().catch((err) => {
-    console.error("[instrumentation] initial billing dunning failed:", err);
+    logApp("error", "[instrumentation] initial billing dunning failed", {
+      category: "billing",
+      error: err,
+    });
   });
 
   setInterval(() => {
     void runBillingDunning().catch((err) => {
-      console.error("[instrumentation] periodic billing dunning failed:", err);
+      logApp("error", "[instrumentation] periodic billing dunning failed", {
+        category: "billing",
+        error: err,
+      });
     });
   }, intervalMs);
 

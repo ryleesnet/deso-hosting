@@ -8,6 +8,7 @@ import axios, { type AxiosInstance } from "axios";
 import { normalizeExtraDisksGb } from "@/lib/extra-disks";
 import type { CloudInitPublicNetwork } from "@/lib/public-ip-pool";
 import { resolveProxmoxDiskStoragePool, getProxmoxHostConfig } from "@/lib/proxmox-host-config";
+import { logApp } from "@/lib/app-log";
 
 const PROXMOX_HOST = process.env.PROXMOX_HOST || "localhost";
 const PROXMOX_PORT = process.env.PROXMOX_PORT || "8006";
@@ -128,26 +129,31 @@ export async function getProxmoxClient(): Promise<AxiosInstance> {
       if (status && status >= 400) {
         const data = err.response?.data;
         const cfg = err.config ?? {};
-        console.error(
-          `[Proxmox] ${cfg.method?.toUpperCase?.() ?? "REQ"} ${cfg.url ?? "?"} -> ${status} ${err.response?.statusText ?? ""}`
-        );
+        const method = cfg.method?.toUpperCase?.() ?? "REQ";
+        const url = cfg.url ?? "?";
+        const statusText = err.response?.statusText ?? "";
+        const parts: string[] = [];
         if (data !== undefined) {
           try {
-            console.error("[Proxmox] response data:", JSON.stringify(data));
+            parts.push(`response: ${JSON.stringify(data)}`);
           } catch {
-            console.error("[Proxmox] response data: [unserializable]");
+            parts.push("response: [unserializable]");
           }
         }
         if (typeof cfg.data === "string" && cfg.data.length < 4000) {
-          console.error("[Proxmox] request body:", redactPveFormBody(cfg.data));
+          parts.push(`request body: ${redactPveFormBody(cfg.data)}`);
         }
         const inner =
           (data && typeof data === "object" && (data as { errors?: unknown }).errors) || null;
         if (inner && typeof inner === "object") {
           for (const [field, msg] of Object.entries(inner)) {
-            console.error(`[Proxmox] field error ${field}:`, msg);
+            parts.push(`field ${field}: ${String(msg)}`);
           }
         }
+        logApp("error", `[Proxmox] ${method} ${url} -> ${status} ${statusText}`.trim(), {
+          category: "proxmox",
+          details: parts.length ? parts.join("\n") : undefined,
+        });
       }
       throw err;
     }

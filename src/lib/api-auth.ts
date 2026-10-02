@@ -21,6 +21,7 @@ import {
   envAdminPublicKeys,
   publicKeyIsAdminAsync,
 } from "@/lib/admin-access";
+import { mergeLogContext } from "@/lib/app-log";
 
 export { PUBLIC_KEY_HEADER };
 
@@ -78,6 +79,11 @@ export async function requireUser(
   if (opts?.requireAdmin && !admin) {
     return unauthorized("Admin access required", 403);
   }
+
+  mergeLogContext({
+    actorId: result.mainPublicKey,
+    userId: result.mainPublicKey,
+  });
 
   return { ok: true, publicKey: result.mainPublicKey, isAdmin: admin };
 }

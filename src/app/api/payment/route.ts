@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
       nextPaymentAt: nextPayment.toISOString(),
     });
   } catch (err) {
-    console.error(err);
+    console.error("[payment] verification failed", err);
     return NextResponse.json(
       { error: "Payment verification failed" },
       { status: 500 }

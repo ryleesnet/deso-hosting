@@ -225,7 +225,7 @@ export async function POST(req: NextRequest) {
       throw e;
     }
   } catch (err) {
-    console.error(err);
+    console.error("[billing/renew]", err);
     return NextResponse.json(
       { error: "Renewal processing failed" },
       { status: 500 }

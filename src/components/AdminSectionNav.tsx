@@ -6,6 +6,7 @@ const SECTIONS = [
   { id: "admin-services", label: "Services" },
   { id: "admin-host", label: "Host config" },
   { id: "admin-ips", label: "Public IPs" },
+  { id: "admin-logs", label: "Logs" },
   { id: "admin-admins", label: "Admins" },
 ] as const;
 
