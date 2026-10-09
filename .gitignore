@@ -27,7 +27,7 @@ firebase-key*.json
 data/
 
 # App logs (JSONL; last 30 days kept on disk)
-logs/
+/logs/
 
 # Debug
 npm-debug.log*
