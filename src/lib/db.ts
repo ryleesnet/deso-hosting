@@ -434,6 +434,16 @@ export async function getRenewalTxByHash(
   return doc.data() as RenewalTxRecord;
 }
 
+/** Every recorded renewal or PayPal sale, newest first. */
+export async function listRenewalTxs(): Promise<RenewalTxRecord[]> {
+  const snap = await db().collection(COL_RENEWAL_TXS).get();
+  const list = snap.docs.map((d) => {
+    const data = d.data() as RenewalTxRecord;
+    return { ...data, txHashHex: data.txHashHex || d.id };
+  });
+  return list.sort((a, b) => (a.processedAt < b.processedAt ? 1 : -1));
+}
+
 export async function commitSubscriptionRenewalWithTxRecord(params: {
   txHashHex: string;
   orderId: string;

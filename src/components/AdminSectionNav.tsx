@@ -1,6 +1,7 @@
 "use client";
 
 const SECTIONS = [
+  { id: "admin-accounting", label: "Akaunting" },
   { id: "admin-orders", label: "Orders" },
   { id: "admin-import", label: "Import VM" },
   { id: "admin-services", label: "Services" },

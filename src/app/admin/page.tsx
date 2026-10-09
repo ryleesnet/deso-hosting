@@ -10,6 +10,7 @@ import { ProxmoxHostConfigPanel } from "@/components/ProxmoxHostConfigPanel";
 import { AdminSectionNav } from "@/components/AdminSectionNav";
 import { AdminsAdminPanel } from "@/components/AdminsAdminPanel";
 import { AdminLogsPanel } from "@/components/AdminLogsPanel";
+import { AdminAccountingPanel } from "@/components/AdminAccountingPanel";
 import { formatDesoDisplay } from "@/lib/deso";
 import { formatUsdCents } from "@/lib/pricing";
 import { apiFetch } from "@/lib/api-client";
@@ -624,10 +625,12 @@ export default function AdminPage() {
     <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
       <h1 className="text-3xl font-bold">Admin Panel</h1>
       <p className="mt-2 text-[var(--muted)]">
-        Orders, catalogue, host settings, logs, and access control
+        Akaunting queue, orders, catalogue, host settings, logs, and access control
       </p>
 
       <AdminSectionNav />
+
+      <AdminAccountingPanel />
 
       {/* Orders */}
       <section id="admin-orders" className="scroll-mt-28 mt-10">

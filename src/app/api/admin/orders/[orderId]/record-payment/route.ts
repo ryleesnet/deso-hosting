@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   getOrder,
+  getService,
   getSubscriptionByOrder,
   recordManualSubscriptionPayment,
 } from "@/lib/db";
+import { recordManualAccountingPayment } from "@/lib/accounting-books";
+import { getUsdPerDeso } from "@/lib/deso-usd-rate";
+import { monthlyTotalUsdCentsForOrder } from "@/lib/service-pricing";
 import { resumeOrderAfterPayment } from "@/lib/order-lifecycle";
 import {
   computeExpirationFromPaymentDate,
@@ -88,6 +92,52 @@ export async function POST(
       lastPaymentAt: lastPaymentAt.toISOString(),
       nextPaymentAt: nextPaymentAt.toISOString(),
     });
+
+    const monthsForBooks = nextPaymentRaw
+      ? Math.min(
+          36,
+          Math.max(
+            1,
+            Math.round(
+              (nextPaymentAt.getTime() - lastPaymentAt.getTime()) /
+                (30 * 24 * 60 * 60 * 1000)
+            ) || 1
+          )
+        )
+      : parseRenewalMonths(body.months);
+    let usdCents: number | undefined;
+    if (
+      order.paymentProvider === "paypal" &&
+      typeof order.paypalMonthlyUsdCents === "number"
+    ) {
+      usdCents = Math.round(order.paypalMonthlyUsdCents) * monthsForBooks;
+    } else {
+      const service = await getService(order.serviceId);
+      if (service) {
+        try {
+          const rate = await getUsdPerDeso();
+          usdCents =
+            monthlyTotalUsdCentsForOrder(
+              service,
+              rate.usdPerDeso,
+              order.extraDisksGb
+            ) * monthsForBooks;
+        } catch {
+          /* amount stays blank on the queue row */
+        }
+      }
+    }
+    await recordManualAccountingPayment({
+      orderId,
+      userId: order.userId,
+      paidAt: lastPaymentAt.toISOString(),
+      nextPaymentAt: nextPaymentAt.toISOString(),
+      months: monthsForBooks,
+      usdCents,
+      recordedBy: auth.publicKey,
+    }).catch((e) =>
+      console.error("[admin/record-payment] accounting queue:", e)
+    );
 
     await resumeOrderAfterPayment(orderId).catch((e) =>
       console.error("[admin/record-payment] resume after payment:", e)
