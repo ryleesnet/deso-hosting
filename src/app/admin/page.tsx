@@ -2051,7 +2051,7 @@ function PublicIpPoolConfigPanel({ publicKey }: { publicKey: string }) {
               value={gateway}
               onChange={(e) => setGateway(e.target.value)}
               className="mt-1 w-full rounded-lg border border-[var(--card-border)] bg-[var(--background)] px-3 py-2 text-sm font-mono"
-              placeholder="68.122.49.254"
+              placeholder="23.116.71.254"
             />
           </div>
           <div>

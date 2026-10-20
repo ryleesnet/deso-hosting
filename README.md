@@ -116,7 +116,7 @@ VPS plans, orders, and subscriptions are stored in **Cloud Firestore** via the F
 - **`FIREBASE_PROJECT_ID`**, **`FIREBASE_CLIENT_EMAIL`**, **`FIREBASE_PRIVATE_KEY`** — separate fields; in `private_key`, use `\n` for newline breaks inside the string.
 - **`GOOGLE_APPLICATION_CREDENTIALS`** — path to a service account JSON file on disk.
 
-**Firestore collections:** `services`, `orders`, `subscriptions` (document ID = each record’s `id`), and **`public_ips`** (document ID = the IPv4 string, e.g. `68.122.49.208`).
+**Firestore collections:** `services`, `orders`, `subscriptions` (document ID = each record’s `id`), and **`public_ips`** (document ID = the IPv4 string, e.g. `23.116.71.208`).
 
 **Public IPv4 pool:** Each address is one Firestore document with `status` (`available` \| `assigned` \| `reserved`), and when assigned: `userId`, `orderId`, `vmid`, `node`, `assignedAt`. Keep `PUBLIC_IP_GATEWAY` (and optional `PUBLIC_IP_PREFIX_LEN`, `PUBLIC_IP_DNS`) for cloud-init. Define which IPs exist by seeding from CIDR:
 
