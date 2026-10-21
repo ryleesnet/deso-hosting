@@ -44,6 +44,23 @@ export async function PATCH(req: NextRequest) {
       const v = body.backupStorage;
       patch.backupStorage = v == null || v === "" ? null : String(v);
     }
+    if (Object.prototype.hasOwnProperty.call(body, "publicBridge")) {
+      const v = body.publicBridge;
+      patch.publicBridge = v == null || v === "" ? null : String(v);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "publicVlanTag")) {
+      const v = body.publicVlanTag;
+      if (v == null || v === "") {
+        patch.publicVlanTag = null;
+      } else {
+        const n = typeof v === "number" ? v : parseInt(String(v), 10);
+        patch.publicVlanTag = n;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "privateLanBridge")) {
+      const v = body.privateLanBridge;
+      patch.privateLanBridge = v == null || v === "" ? null : String(v);
+    }
 
     const updated = await setProxmoxHostConfig(patch);
     return NextResponse.json(updated);

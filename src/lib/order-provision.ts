@@ -112,8 +112,7 @@ async function buildApplyHardwareOptionsFromOrder(
     hwOpts.extraDisksGb = order.extraDisksGb;
   }
 
-  const bridge =
-    process.env.PROXMOX_PRIVATE_LAN_BRIDGE?.trim() || "vmbr0";
+  const bridge = (await getProxmoxHostConfig()).effectivePrivateLanBridge;
   const privateLan =
     order.privateLanEnabled &&
     order.privateLanIp?.trim() &&

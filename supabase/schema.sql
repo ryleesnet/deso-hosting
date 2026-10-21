@@ -157,6 +157,9 @@ create table if not exists proxmox_host_config (
   auto_place_new_vms boolean,
   default_disk_storage text,
   backup_storage text,
+  public_bridge text,
+  public_vlan_tag integer,
+  private_lan_bridge text,
   updated_at text
 );
 

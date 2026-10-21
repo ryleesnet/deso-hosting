@@ -7,7 +7,12 @@ import * as https from "node:https";
 import axios, { type AxiosInstance } from "axios";
 import { normalizeExtraDisksGb } from "@/lib/extra-disks";
 import type { CloudInitPublicNetwork } from "@/lib/public-ip-pool";
-import { resolveProxmoxDiskStoragePool, getProxmoxHostConfig } from "@/lib/proxmox-host-config";
+import {
+  resolveProxmoxDiskStoragePool,
+  getProxmoxHostConfig,
+  resolvePublicNet0,
+  formatPublicNet0,
+} from "@/lib/proxmox-host-config";
 import { logApp } from "@/lib/app-log";
 
 const PROXMOX_HOST = process.env.PROXMOX_HOST || "localhost";
@@ -429,40 +434,6 @@ function resolveCicustomVendor(): string | null {
     return trimmed ? trimmed : null;
   }
   return DEFAULT_CICUSTOM;
-}
-
-function resolvePublicNetBridge(): string {
-  return (
-    process.env.PROXMOX_PUBLIC_BRIDGE?.trim() ||
-    process.env.PROXMOX_PRIVATE_LAN_BRIDGE?.trim() ||
-    "vmbr0"
-  );
-}
-
-/** VLAN tag on the public NIC (`net0`). Default 888. Set `PROXMOX_PUBLIC_VLAN_TAG=0` to omit. */
-function resolvePublicVlanTag(): number | null {
-  const raw = process.env.PROXMOX_PUBLIC_VLAN_TAG;
-  if (raw != null) {
-    const trimmed = raw.trim();
-    if (!trimmed || trimmed === "0") return null;
-    const n = parseInt(trimmed, 10);
-    if (!Number.isInteger(n) || n < 1 || n > 4094) {
-      throw new Error(
-        `PROXMOX_PUBLIC_VLAN_TAG must be 1–4094 or 0 to disable (got ${JSON.stringify(raw)})`
-      );
-    }
-    return n;
-  }
-  return 888;
-}
-
-/** Proxmox `net0` value: virtio on the public bridge, optionally VLAN-tagged. */
-function resolvePublicNet0(bridgeOverride?: string): string {
-  const bridge = bridgeOverride?.trim() || resolvePublicNetBridge();
-  const tag = resolvePublicVlanTag();
-  return tag != null
-    ? `virtio,bridge=${bridge},tag=${tag}`
-    : `virtio,bridge=${bridge}`;
 }
 
 function findCloudInitDriveKey(cfg: Record<string, unknown>): string | null {
@@ -1040,7 +1011,7 @@ export async function reinstallVmInPlaceFromImageFile(
 /**
  * Create a new (empty) QEMU guest with a cloud-init CD-ROM, public NIC, and
  * `cicustom` vendor snippet — equivalent to:
- *   qm create VMID --name ... --memory ... --cores ... --net0 virtio,bridge=...,tag=888
+ *   qm create VMID --name ... --memory ... --cores ... --net0 virtio,bridge=...,tag=...
  *   qm set VMID --ide2 <storage>:cloudinit --citype nocloud
  *   qm set VMID --cicustom "vendor=local:snippets/vendor.yaml"
  *
@@ -1069,7 +1040,7 @@ async function createEmptyCloudInitVm(
     ostype: "l26",
     scsihw: "virtio-scsi-pci",
     agent: "enabled=1",
-    net0: resolvePublicNet0(options?.netBridge),
+    net0: await resolvePublicNet0(options?.netBridge),
     ide2: `${storagePool}:cloudinit`,
     citype: "nocloud",
     boot: "order=virtio0",
@@ -1176,7 +1147,7 @@ export async function applyServiceHardwareToVM(
     extraDisksGb?: unknown;
     /**
      * Second virtio NIC (typically `net1`) on a VLAN-tagged bridge for private VM-to-VM networking.
-     * Requires a VLAN-aware Proxmox bridge (see PROXMOX_PRIVATE_LAN_BRIDGE).
+     * Requires a VLAN-aware Proxmox bridge (VM Creation Defaults, or PROXMOX_PRIVATE_LAN_BRIDGE).
      */
     privateLan?: {
       ip: string;
@@ -1191,6 +1162,7 @@ export async function applyServiceHardwareToVM(
   }
 ): Promise<void> {
   const client = await getProxmoxClient();
+  const hostCfg = await getProxmoxHostConfig();
 
   try {
     const { data } = await client.get(
@@ -1242,7 +1214,10 @@ export async function applyServiceHardwareToVM(
   const cicustom = resolveCicustomVendor();
   if (cicustom) configParams.cicustom = cicustom;
 
-  configParams.net0 = resolvePublicNet0();
+  configParams.net0 = formatPublicNet0(
+    hostCfg.effectivePublicBridge,
+    hostCfg.effectivePublicVlanTag
+  );
 
   const ci = options?.cloudInit;
   if (ci?.ciuser && ci.cipassword) {
@@ -1274,10 +1249,7 @@ export async function applyServiceHardwareToVM(
     pl.vlanTag >= 1 &&
     pl.vlanTag <= 4094
   ) {
-    const bridge =
-      pl.bridge?.trim() ||
-      process.env.PROXMOX_PRIVATE_LAN_BRIDGE?.trim() ||
-      "vmbr0";
+    const bridge = pl.bridge?.trim() || hostCfg.effectivePrivateLanBridge;
     configParams.net1 = `virtio,bridge=${bridge},tag=${pl.vlanTag}`;
     configParams.ipconfig1 = `ip=${pl.ip.trim()}/${pl.prefixLen}`;
   }

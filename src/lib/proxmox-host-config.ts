@@ -1,5 +1,5 @@
 /**
- * Firestore-backed Proxmox host defaults (clone placement + disk storage).
+ * Firestore-backed defaults for new VM creation (placement, storage, network).
  *
  * Doc path: `proxmox_host_config/default`.
  * Env vars remain fallbacks when Firestore fields are blank.
@@ -15,6 +15,10 @@ const DEFAULT_DISK_STORAGE = "SAN_HDD";
 const DISK_STORAGE_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,62}$/;
 /** Proxmox node names (hostname-style). */
 const NODE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
+/** Linux bridge names used for net0 / net1 (IFNAMSIZ is 16 including NUL). */
+const BRIDGE_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,14}$/;
+const DEFAULT_PUBLIC_VLAN_TAG = 888;
+const DEFAULT_BRIDGE = "vmbr0";
 
 export interface ProxmoxHostConfig {
   /** Default Proxmox node for new clones when a service plan has no `proxmoxNode`. */
@@ -28,6 +32,14 @@ export interface ProxmoxHostConfig {
   defaultDiskStorage?: string;
   /** Proxmox storage pool where vzdump backups are listed for restore. */
   backupStorage?: string;
+  /** Bridge for the public NIC (`net0`) on new guests. */
+  publicBridge?: string;
+  /**
+   * VLAN tag on `net0`. `0` omits the tag. Unset falls through to env, then 888.
+   */
+  publicVlanTag?: number;
+  /** Bridge for the per-user private NIC (`net1`). */
+  privateLanBridge?: string;
   updatedAt?: string;
 }
 
@@ -36,6 +48,10 @@ export type ProxmoxHostConfigEffective = ProxmoxHostConfig & {
   effectiveDefaultDiskStorage: string;
   effectiveBackupStorage: string;
   effectiveAutoPlaceNewVms: boolean;
+  effectivePublicBridge: string;
+  /** `null` means the public NIC is untagged. */
+  effectivePublicVlanTag: number | null;
+  effectivePrivateLanBridge: string;
 };
 
 interface RawConfigDoc {
@@ -43,6 +59,9 @@ interface RawConfigDoc {
   autoPlaceNewVms?: unknown;
   defaultDiskStorage?: unknown;
   backupStorage?: unknown;
+  publicBridge?: unknown;
+  publicVlanTag?: unknown;
+  privateLanBridge?: unknown;
   updatedAt?: unknown;
 }
 
@@ -57,6 +76,13 @@ function asBoolean(v: unknown): boolean | undefined {
   return undefined;
 }
 
+/** `0`–`4094` are stored values (`0` omits the tag). Anything else is unset. */
+function asVlanTag(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : parseInt(String(v ?? ""), 10);
+  if (!Number.isInteger(n) || n < 0 || n > 4094) return undefined;
+  return n;
+}
+
 export function validateProxmoxDiskStorageId(raw: string): string | { error: string } {
   const s = raw.trim();
   if (!s) return { error: "Storage ID cannot be empty." };
@@ -68,6 +94,28 @@ export function validateProxmoxDiskStorageId(raw: string): string | { error: str
     };
   }
   return s;
+}
+
+export function validateProxmoxBridgeName(raw: string): string | { error: string } {
+  const s = raw.trim();
+  if (!s) return { error: "Bridge name cannot be empty." };
+  if (!BRIDGE_RE.test(s)) {
+    return {
+      error:
+        "Bridge name must start with a letter and contain only letters, digits, underscores, or hyphens (max 15 characters).",
+    };
+  }
+  return s;
+}
+
+/** `0` omits the public VLAN tag. */
+export function validatePublicVlanTag(raw: number): number | { error: string } {
+  if (!Number.isInteger(raw) || raw < 0 || raw > 4094) {
+    return {
+      error: "Public VLAN must be an integer from 0 to 4094. Use 0 to omit the tag.",
+    };
+  }
+  return raw;
 }
 
 export function validateProxmoxNodeName(raw: string): string | { error: string } {
@@ -100,6 +148,9 @@ async function readFirestoreConfig(): Promise<ProxmoxHostConfig> {
         autoPlaceNewVms: asBoolean(raw.autoPlaceNewVms),
         defaultDiskStorage: asTrimmedString(raw.defaultDiskStorage),
         backupStorage: asTrimmedString(raw.backupStorage),
+        publicBridge: asTrimmedString(raw.publicBridge),
+        publicVlanTag: asVlanTag(raw.publicVlanTag),
+        privateLanBridge: asTrimmedString(raw.privateLanBridge),
         updatedAt: asTrimmedString(raw.updatedAt),
       };
     }
@@ -118,16 +169,38 @@ export function invalidateProxmoxHostConfigCache(): void {
   cached = null;
 }
 
+function envPublicVlanTag(): number | null {
+  const raw = process.env.PROXMOX_PUBLIC_VLAN_TAG;
+  if (raw == null) return DEFAULT_PUBLIC_VLAN_TAG;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === "0") return null;
+  const n = parseInt(trimmed, 10);
+  if (!Number.isInteger(n) || n < 1 || n > 4094) {
+    throw new Error(
+      `PROXMOX_PUBLIC_VLAN_TAG must be 1–4094 or 0 to disable (got ${JSON.stringify(raw)})`
+    );
+  }
+  return n;
+}
+
 function withEffectiveFields(fromStore: ProxmoxHostConfig): ProxmoxHostConfigEffective {
   const envNode = asTrimmedString(process.env.PROXMOX_DEFAULT_NODE);
   const envStorage = asTrimmedString(process.env.PROXMOX_DISK_STORAGE);
   const envBackupStorage = asTrimmedString(process.env.PROXMOX_BACKUP_STORAGE);
+  const envPublicBridge = asTrimmedString(process.env.PROXMOX_PUBLIC_BRIDGE);
+  const envPrivateBridge = asTrimmedString(process.env.PROXMOX_PRIVATE_LAN_BRIDGE);
   const envDisableAuto =
     process.env.PROXMOX_AUTO_PLACE_VMS === "0" ||
     process.env.PROXMOX_AUTO_PLACE_VMS === "false";
 
   const effectiveDefaultDiskStorage =
     fromStore.defaultDiskStorage ?? envStorage ?? DEFAULT_DISK_STORAGE;
+  const effectivePrivateLanBridge =
+    fromStore.privateLanBridge ?? envPrivateBridge ?? DEFAULT_BRIDGE;
+
+  const storedVlan = fromStore.publicVlanTag;
+  const effectivePublicVlanTag =
+    storedVlan === undefined ? envPublicVlanTag() : storedVlan === 0 ? null : storedVlan;
 
   return {
     ...fromStore,
@@ -139,7 +212,31 @@ function withEffectiveFields(fromStore: ProxmoxHostConfig): ProxmoxHostConfigEff
       fromStore.autoPlaceNewVms !== undefined
         ? fromStore.autoPlaceNewVms
         : !envDisableAuto,
+    effectivePublicBridge:
+      fromStore.publicBridge ??
+      envPublicBridge ??
+      envPrivateBridge ??
+      DEFAULT_BRIDGE,
+    effectivePublicVlanTag,
+    effectivePrivateLanBridge,
   };
+}
+
+/** Proxmox `net0` value: virtio on the public bridge, optionally VLAN-tagged. */
+export function formatPublicNet0(bridge: string, vlanTag: number | null): string {
+  return vlanTag != null
+    ? `virtio,bridge=${bridge},tag=${vlanTag}`
+    : `virtio,bridge=${bridge}`;
+}
+
+/**
+ * Public NIC for a new guest. `bridgeOverride` replaces the configured bridge
+ * and still uses the configured VLAN tag.
+ */
+export async function resolvePublicNet0(bridgeOverride?: string): Promise<string> {
+  const cfg = await getProxmoxHostConfig();
+  const bridge = bridgeOverride?.trim() || cfg.effectivePublicBridge;
+  return formatPublicNet0(bridge, cfg.effectivePublicVlanTag);
 }
 
 /** Effective host defaults: Firestore → env → built-in fallbacks. */
@@ -166,6 +263,10 @@ export async function setProxmoxHostConfig(patch: {
   autoPlaceNewVms?: boolean | null;
   defaultDiskStorage?: string | null;
   backupStorage?: string | null;
+  publicBridge?: string | null;
+  /** `null` clears the override. `0` omits the public VLAN tag. */
+  publicVlanTag?: number | null;
+  privateLanBridge?: string | null;
 }): Promise<ProxmoxHostConfigEffective> {
   const ref = getFirestoreDb().collection(COL).doc(DEFAULT_DOC_ID);
   const update: Record<string, unknown> = {
@@ -204,6 +305,36 @@ export async function setProxmoxHostConfig(patch: {
       const validated = validateProxmoxDiskStorageId(patch.backupStorage);
       if (typeof validated === "object") throw new Error(validated.error);
       update.backupStorage = validated;
+    }
+  }
+
+  if (patch.publicBridge !== undefined) {
+    if (patch.publicBridge === null || patch.publicBridge === "") {
+      update.publicBridge = null;
+    } else {
+      const validated = validateProxmoxBridgeName(patch.publicBridge);
+      if (typeof validated === "object") throw new Error(validated.error);
+      update.publicBridge = validated;
+    }
+  }
+
+  if (patch.publicVlanTag !== undefined) {
+    if (patch.publicVlanTag === null) {
+      update.publicVlanTag = null;
+    } else {
+      const validated = validatePublicVlanTag(patch.publicVlanTag);
+      if (typeof validated === "object") throw new Error(validated.error);
+      update.publicVlanTag = validated;
+    }
+  }
+
+  if (patch.privateLanBridge !== undefined) {
+    if (patch.privateLanBridge === null || patch.privateLanBridge === "") {
+      update.privateLanBridge = null;
+    } else {
+      const validated = validateProxmoxBridgeName(patch.privateLanBridge);
+      if (typeof validated === "object") throw new Error(validated.error);
+      update.privateLanBridge = validated;
     }
   }
 
