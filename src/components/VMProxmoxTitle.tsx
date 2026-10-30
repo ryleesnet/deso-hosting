@@ -1,55 +1,26 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiFetch } from "@/lib/api-client";
 
 type Props = {
   orderId: string;
   vmid: number;
+  /** Name from the shared cluster snapshot. Empty until that lookup returns. */
+  liveName?: string | null;
 };
 
 /** Heading: VM display name from Proxmox; click to edit (saved to Proxmox / shown on the site). */
-export function VMProxmoxTitle({ orderId, vmid }: Props) {
+export function VMProxmoxTitle({ orderId, vmid, liveName = null }: Props) {
   const { user } = useAuth();
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const [name, setName] = useState<string | null>(null);
+  const [savedName, setSavedName] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (vmid <= 0) {
-      setName(null);
-      return;
-    }
-    let cancelled = false;
-
-    async function poll() {
-      try {
-        const res = await apiFetch(`/api/vm/${orderId}/status`);
-        const data = (await res.json()) as { name?: unknown; error?: string };
-        if (cancelled) return;
-        if (!res.ok || data.error) {
-          setName(null);
-          return;
-        }
-        const raw = data.name;
-        const n = typeof raw === "string" ? raw.trim() : "";
-        setName(n || null);
-      } catch {
-        if (!cancelled) setName(null);
-      }
-    }
-
-    void poll();
-    const id = setInterval(poll, 15_000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [orderId, vmid]);
-
+  const name = savedName ?? (liveName?.trim() || null);
   const fallbackLabel = vmid > 0 ? `VPS - ${vmid}` : "VPS - …";
   const displayText = vmid <= 0 ? "VPS - …" : name || fallbackLabel;
 
@@ -81,7 +52,7 @@ export function VMProxmoxTitle({ orderId, vmid }: Props) {
         throw new Error(data.error || "Failed to save");
       }
       const saved = typeof data.name === "string" ? data.name.trim() : next;
-      setName(saved || null);
+      setSavedName(saved || null);
       dialogRef.current?.close();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Save failed");

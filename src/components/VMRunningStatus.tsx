@@ -27,6 +27,11 @@ interface VMRunningStatusProps {
   /** Larger pills for dashboard title row. */
   size?: "default" | "prominent";
   /**
+   * Power state from the shared cluster snapshot.
+   * `undefined` = snapshot not loaded yet. `null` = VM missing from the cluster.
+   */
+  liveStatus?: string | null;
+  /**
    * When set, shows an in-progress label with fast polling. Cleared when the target is observed
    * (`onPendingPowerSynced` for start/shutdown) or when `VPSControl` finishes polling (reboot/reset).
    */
@@ -39,6 +44,7 @@ interface VMRunningStatusProps {
 export function VMRunningStatus({
   orderId,
   size = "default",
+  liveStatus,
   pendingPowerAction,
   onPendingPowerSynced,
 }: VMRunningStatusProps) {
@@ -48,12 +54,39 @@ export function VMRunningStatus({
       : "rounded-full px-3 py-0.5 text-xs font-semibold uppercase tracking-wide";
   const [display, setDisplay] = useState<DisplayState>("loading");
   const onSyncedRef = useRef(onPendingPowerSynced);
+  /** Snapshot value when a power action started, so a stale listing doesn't undo the fast poll. */
+  const statusWhenPendingStarted = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     onSyncedRef.current = onPendingPowerSynced;
   }, [onPendingPowerSynced]);
 
   useEffect(() => {
+    if (pendingPowerAction) {
+      statusWhenPendingStarted.current = liveStatus;
+      return;
+    }
+    if (
+      statusWhenPendingStarted.current !== undefined &&
+      liveStatus === statusWhenPendingStarted.current
+    ) {
+      return;
+    }
+    statusWhenPendingStarted.current = undefined;
+    if (liveStatus === undefined) {
+      setDisplay("loading");
+      return;
+    }
+    if (liveStatus === null) {
+      setDisplay("error");
+      return;
+    }
+    const s = liveStatus.trim().toLowerCase();
+    setDisplay(s === "running" ? "running" : "off");
+  }, [liveStatus, pendingPowerAction]);
+
+  useEffect(() => {
+    if (!pendingPowerAction) return;
     let cancelled = false;
 
     async function poll() {
@@ -76,8 +109,7 @@ export function VMRunningStatus({
     }
 
     void poll();
-    const intervalMs = pendingPowerAction ? 750 : 15_000;
-    const id = setInterval(poll, intervalMs);
+    const id = setInterval(poll, 750);
     return () => {
       cancelled = true;
       clearInterval(id);

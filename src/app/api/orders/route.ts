@@ -68,16 +68,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });
   }
 
-  const subs = wantAll
-    ? await getSubscriptions()
-    : await getSubscriptionsByUser(auth.publicKey);
+  // Dunning has its own scheduler. Never block the order list on it.
+  runBillingDunningIfDue();
+
+  const [subs, orders] = await Promise.all([
+    wantAll ? getSubscriptions() : getSubscriptionsByUser(auth.publicKey),
+    wantAll ? getOrders() : getOrdersByUser(auth.publicKey),
+  ]);
   const subByOrderId = new Map(subs.map((s) => [s.orderId, s]));
-
-  await runBillingDunningIfDue();
-
-  const orders = wantAll
-    ? await getOrders()
-    : await getOrdersByUser(auth.publicKey);
 
   const enriched = orders.map((o) => enrichOrder(o, subByOrderId));
 

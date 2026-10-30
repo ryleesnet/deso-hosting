@@ -11,9 +11,10 @@ import {
   getOrder,
   getOrders,
   getSubscriptions,
-  getSubscriptionByOrder,
   updateOrder,
   updateSubscription,
+  type Order,
+  type Subscription,
 } from "@/lib/db";
 import { getVMStatus, shutdownVM, startVM } from "@/lib/proxmox";
 import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
@@ -26,6 +27,13 @@ export function suspendAfterPastDueDays(): number {
 }
 
 let lastDunningRunAt = 0;
+let dunningInFlight: Promise<DunningResult> | null = null;
+
+type DunningResult = {
+  markedPastDue: number;
+  suspendedOrderIds: string[];
+  billingDms: Awaited<ReturnType<typeof sendBillingDmNotifications>>;
+};
 
 function dunningMinIntervalMs(): number {
   const raw = process.env.BILLING_DUNNING_MIN_INTERVAL_MS?.trim();
@@ -33,41 +41,63 @@ function dunningMinIntervalMs(): number {
   return Number.isFinite(n) && n > 0 ? n : 300_000;
 }
 
-/** Mark overdue subs past_due, suspend VPS past grace, and send billing DMs. */
-export async function runBillingDunning(): Promise<{
-  markedPastDue: number;
-  suspendedOrderIds: string[];
-  billingDms: Awaited<ReturnType<typeof sendBillingDmNotifications>>;
-}> {
-  const markedPastDue = await markPastDueSubscriptions();
-  const { suspended } = await autoSuspendDelinquentOrders();
-  const billingDms = await sendBillingDmNotifications();
-  lastDunningRunAt = Date.now();
+/**
+ * Mark overdue subs past_due, suspend VPS past grace, and send billing DMs.
+ * Overlapping callers share one in-flight run.
+ */
+export function runBillingDunning(): Promise<DunningResult> {
+  if (dunningInFlight) return dunningInFlight;
+  const run = runBillingDunningOnce().then((result) => {
+    lastDunningRunAt = Date.now();
+    return result;
+  });
+  dunningInFlight = run;
+  void run
+    .finally(() => {
+      if (dunningInFlight === run) dunningInFlight = null;
+    })
+    .catch(() => undefined);
+  return run;
+}
+
+async function runBillingDunningOnce(): Promise<DunningResult> {
+  const [orders, subs] = await Promise.all([getOrders(), getSubscriptions()]);
+  const markedPastDue = await markPastDueSubscriptions(subs);
+  const { suspended } = await autoSuspendDelinquentOrders(orders, subs);
+  const billingDms = await sendBillingDmNotifications(orders, subs);
   return { markedPastDue, suspendedOrderIds: suspended, billingDms };
 }
 
-/** Throttled dunning for request paths (dashboard load, etc.). */
-export async function runBillingDunningIfDue(): Promise<void> {
-  const now = Date.now();
-  if (now - lastDunningRunAt < dunningMinIntervalMs()) return;
-  await runBillingDunning();
+/**
+ * Schedule dunning without blocking the caller. Page loads use this so a
+ * Proxmox/DeSo scan never sits on the dashboard or admin response.
+ */
+export function runBillingDunningIfDue(): void {
+  if (dunningInFlight) return;
+  if (Date.now() - lastDunningRunAt < dunningMinIntervalMs()) return;
+  lastDunningRunAt = Date.now();
+  void runBillingDunning().catch((err) => {
+    console.error("[billing-dunning]", err);
+  });
 }
 
 export { effectiveSubscriptionStatus, isPaymentOverdue };
 
 /** Set subscription to `past_due` when `nextPaymentAt` is in the past and status was `active`. */
-export async function markPastDueSubscriptions(): Promise<number> {
-  const subs = await getSubscriptions();
-  let count = 0;
+export async function markPastDueSubscriptions(
+  existing?: Subscription[]
+): Promise<number> {
+  const subs = existing ?? (await getSubscriptions());
   const now = Date.now();
-  for (const s of subs) {
-    if (s.status !== "active") continue;
+  const overdue = subs.filter((s) => {
+    if (s.status !== "active") return false;
     const due = new Date(s.nextPaymentAt).getTime();
-    if (Number.isNaN(due) || due >= now) continue;
-    await updateSubscription(s.id, { status: "past_due" });
-    count += 1;
-  }
-  return count;
+    return !Number.isNaN(due) && due < now;
+  });
+  await Promise.all(
+    overdue.map((s) => updateSubscription(s.id, { status: "past_due" }))
+  );
+  return overdue.length;
 }
 
 /** ACPI shutdown when running/paused; no-op when already stopped. */
@@ -104,19 +134,26 @@ export async function suspendOrderById(orderId: string): Promise<void> {
 }
 
 /** Orders that are `active` with a non-cancelled subscription past the grace window. */
-export async function autoSuspendDelinquentOrders(): Promise<{
+export async function autoSuspendDelinquentOrders(
+  existingOrders?: Order[],
+  existingSubs?: Subscription[]
+): Promise<{
   suspended: string[];
 }> {
   const days = suspendAfterPastDueDays();
   const thresholdMs = days * 24 * 60 * 60 * 1000;
   const now = Date.now();
-  const orders = await getOrders();
+  const [orders, subs] = await Promise.all([
+    existingOrders ?? getOrders(),
+    existingSubs ?? getSubscriptions(),
+  ]);
+  const subByOrderId = new Map(subs.map((s) => [s.orderId, s]));
   const suspended: string[] = [];
 
   for (const order of orders) {
     if (order.status !== "active") continue;
 
-    const sub = await getSubscriptionByOrder(order.id);
+    const sub = subByOrderId.get(order.id);
     if (!sub || sub.status === "cancelled") continue;
     if (sub.status !== "active" && sub.status !== "past_due") continue;
 

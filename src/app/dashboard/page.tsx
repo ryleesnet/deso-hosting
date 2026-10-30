@@ -110,6 +110,10 @@ export default function DashboardPage() {
     []
   );
   const [loading, setLoading] = useState(true);
+  const [vmLive, setVmLive] = useState<
+    Record<string, { name: string | null; status: string | null }>
+  >({});
+  const [vmLiveReady, setVmLiveReady] = useState(false);
   /** VM orderId → power action in progress (syncs status pill with controls). */
   const [vmPowerPendingByOrder, setVmPowerPendingByOrder] = useState<
     Partial<Record<string, VmPowerControlAction>>
@@ -200,6 +204,36 @@ export default function DashboardPage() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+
+    async function loadLive() {
+      try {
+        const res = await apiFetch("/api/vm/live");
+        const data = (await res.json()) as {
+          byOrderId?: Record<string, { name: string | null; status: string | null }>;
+        };
+        if (cancelled) return;
+        if (!res.ok || !data.byOrderId) {
+          setVmLiveReady(true);
+          return;
+        }
+        setVmLive(data.byOrderId);
+        setVmLiveReady(true);
+      } catch (err) {
+        console.error("[dashboard] vm live failed", err);
+      }
+    }
+
+    void loadLive();
+    const id = setInterval(loadLive, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [user]);
 
   const hasProvisioningOrder = orders.some((o) => o.status === "provisioning");
   const hasAsyncVmMaintenance = orders.some(
@@ -360,7 +394,11 @@ export default function DashboardPage() {
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0 space-y-1">
                         <h2 className="text-lg font-semibold tracking-tight sm:text-xl">
-                          <VMProxmoxTitle orderId={order.id} vmid={order.vmid} />
+                          <VMProxmoxTitle
+                            orderId={order.id}
+                            vmid={order.vmid}
+                            liveName={vmLiveReady ? (vmLive[order.id]?.name ?? null) : null}
+                          />
                         </h2>
                         <p className="text-xs text-[var(--muted)]">
                           {catalog?.name ?? `Plan ${order.serviceId.slice(0, 8)}…`}
@@ -442,6 +480,9 @@ export default function DashboardPage() {
                             <VMRunningStatus
                               orderId={order.id}
                               size="default"
+                              liveStatus={
+                                vmLiveReady ? (vmLive[order.id]?.status ?? null) : undefined
+                              }
                               pendingPowerAction={vmPowerPendingByOrder[order.id]}
                               onPendingPowerSynced={() => {
                                 setVmPowerPendingByOrder((prev) => {
@@ -561,6 +602,9 @@ export default function DashboardPage() {
                             {order.status === "active" && order.vmid > 0 ? (
                               <VPSControl
                                 orderId={order.id}
+                                liveStatus={
+                                  vmLiveReady ? (vmLive[order.id]?.status ?? null) : undefined
+                                }
                                 powerLocked={vmLocked}
                                 powerLockedTitle={
                                   order.adjustingPlan && order.hardwareMaintenance

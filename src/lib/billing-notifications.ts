@@ -20,9 +20,12 @@ import {
   type Order,
   type Subscription,
 } from "@/lib/db";
-import { fetchDesoUsernameByPublicKey } from "@/lib/deso-profile";
+import {
+  fetchDesoUsernameByPublicKey,
+  fetchDesoUsernamesByPublicKeys,
+} from "@/lib/deso-profile";
 import { isBillingDmConfigured, sendDesoDirectMessage, getBillingDmConfigError } from "@/lib/deso-dm";
-import { getVMStatus } from "@/lib/proxmox";
+import { getClusterResources, getVMStatus } from "@/lib/proxmox";
 import { resolveOrderVmLocation } from "@/lib/proxmox-vm-locator";
 
 const NOTIFY_OFFSETS = [-5, 0, 5] as const;
@@ -184,26 +187,34 @@ async function trySendNotice(params: {
   return "sent";
 }
 
-/** Evaluate all billing DM milestones and send any that are due (idempotent per cycle). */
-export async function sendBillingDmNotifications(): Promise<{
-  sent: number;
-  skipped: number;
-  failed: number;
-  disabled: boolean;
-}> {
-  if (!isBillingDmConfigured()) {
-    return { sent: 0, skipped: 0, failed: 0, disabled: true };
-  }
+type DueNotice = {
+  order: Order;
+  sub: Subscription;
+  kind: BillingDmNotificationKind;
+  billingAnchorDate: string;
+  dueDateKey: string;
+  suspendDateKey: string;
+};
 
-  const todayKey = todayUtcDateKey();
-  const graceDays = billingGraceDays();
-  const orders = await getOrders();
-  const subs = await getSubscriptions();
+/** Notices whose milestone date is today. No network I/O. */
+function collectDueNotices(
+  orders: Order[],
+  subs: Subscription[],
+  todayKey: string,
+  graceDays: number
+): DueNotice[] {
   const subByOrder = new Map(subs.map((s) => [s.orderId, s]));
-
-  let sent = 0;
-  let skipped = 0;
-  let failed = 0;
+  const due: DueNotice[] = [];
+  const renewalKinds: BillingDmNotificationKind[] = [
+    "renewal_minus_5",
+    "renewal_due",
+    "renewal_plus_5",
+  ];
+  const suspendKinds: BillingDmNotificationKind[] = [
+    "suspend_minus_5",
+    "suspend_due",
+    "suspend_plus_5",
+  ];
 
   for (const order of orders) {
     const sub = subByOrder.get(order.id);
@@ -213,23 +224,7 @@ export async function sendBillingDmNotifications(): Promise<{
     const dueDateKey = utcDateKeyFromIso(sub.nextPaymentAt);
     if (!dueDateKey) continue;
 
-    const billingAnchorDate = dueDateKey;
     const suspendDateKey = addUtcDateKey(dueDateKey, graceDays);
-    const greet = await greeting(order.userId);
-    const vm = await vmDisplayLabel(order);
-    const dashboard = dashboardUrl();
-
-    const renewalKinds: BillingDmNotificationKind[] = [
-      "renewal_minus_5",
-      "renewal_due",
-      "renewal_plus_5",
-    ];
-    const suspendKinds: BillingDmNotificationKind[] = [
-      "suspend_minus_5",
-      "suspend_due",
-      "suspend_plus_5",
-    ];
-
     for (let i = 0; i < NOTIFY_OFFSETS.length; i += 1) {
       const offset = NOTIFY_OFFSETS[i]!;
       const renewalKind = renewalKinds[i]!;
@@ -244,23 +239,14 @@ export async function sendBillingDmNotifications(): Promise<{
           renewalMilestone
         )
       ) {
-        const message = buildMessage(renewalKind, {
-          greet,
-          vm,
-          dueDate: dueDateKey,
-          suspendDate: suspendDateKey,
-          dashboard,
-        });
-        const outcome = await trySendNotice({
+        due.push({
           order,
           sub,
           kind: renewalKind,
-          billingAnchorDate,
-          message,
+          billingAnchorDate: dueDateKey,
+          dueDateKey,
+          suspendDateKey,
         });
-        if (outcome === "sent") sent += 1;
-        else if (outcome === "failed") failed += 1;
-        else skipped += 1;
       }
 
       const suspendKind = suspendKinds[i]!;
@@ -275,25 +261,103 @@ export async function sendBillingDmNotifications(): Promise<{
           suspendMilestone
         )
       ) {
-        const message = buildMessage(suspendKind, {
-          greet,
-          vm,
-          dueDate: dueDateKey,
-          suspendDate: suspendDateKey,
-          dashboard,
-        });
-        const outcome = await trySendNotice({
+        due.push({
           order,
           sub,
           kind: suspendKind,
-          billingAnchorDate,
-          message,
+          billingAnchorDate: dueDateKey,
+          dueDateKey,
+          suspendDateKey,
         });
-        if (outcome === "sent") sent += 1;
-        else if (outcome === "failed") failed += 1;
-        else skipped += 1;
       }
     }
+  }
+
+  return due;
+}
+
+/** One cluster listing for the VMs that actually need a DM today. */
+async function vmLabelsForOrders(orders: Order[]): Promise<Map<string, string>> {
+  const labels = new Map<string, string>();
+  let nameByVmid = new Map<number, string>();
+  try {
+    const resources = await getClusterResources();
+    nameByVmid = new Map(
+      resources
+        .filter((r) => r.name?.trim())
+        .map((r) => [r.vmid, r.name.trim()])
+    );
+  } catch (err) {
+    console.warn(
+      "[billing-dm] cluster VM names unavailable",
+      err instanceof Error ? err.message : err
+    );
+  }
+
+  for (const order of orders) {
+    const fromCluster = order.vmid > 0 ? nameByVmid.get(order.vmid) : undefined;
+    const login = order.vmLoginUsername?.trim();
+    labels.set(order.id, fromCluster || login || "your VPS");
+  }
+  return labels;
+}
+
+/** Evaluate all billing DM milestones and send any that are due (idempotent per cycle). */
+export async function sendBillingDmNotifications(
+  existingOrders?: Order[],
+  existingSubs?: Subscription[]
+): Promise<{
+  sent: number;
+  skipped: number;
+  failed: number;
+  disabled: boolean;
+}> {
+  if (!isBillingDmConfigured()) {
+    return { sent: 0, skipped: 0, failed: 0, disabled: true };
+  }
+
+  const todayKey = todayUtcDateKey();
+  const graceDays = billingGraceDays();
+  const [orders, subs] = await Promise.all([
+    existingOrders ?? getOrders(),
+    existingSubs ?? getSubscriptions(),
+  ]);
+  const due = collectDueNotices(orders, subs, todayKey, graceDays);
+  if (!due.length) {
+    return { sent: 0, skipped: 0, failed: 0, disabled: false };
+  }
+
+  const [usernameByPk, vmLabels] = await Promise.all([
+    fetchDesoUsernamesByPublicKeys(due.map((n) => n.order.userId)),
+    vmLabelsForOrders(due.map((n) => n.order)),
+  ]);
+  const dashboard = dashboardUrl();
+
+  let sent = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const notice of due) {
+    const username = usernameByPk.get(notice.order.userId.trim());
+    const greet = username ? `@${username.replace(/^@/, "")}` : "there";
+    const vm = vmLabels.get(notice.order.id) ?? "your VPS";
+    const message = buildMessage(notice.kind, {
+      greet,
+      vm,
+      dueDate: notice.dueDateKey,
+      suspendDate: notice.suspendDateKey,
+      dashboard,
+    });
+    const outcome = await trySendNotice({
+      order: notice.order,
+      sub: notice.sub,
+      kind: notice.kind,
+      billingAnchorDate: notice.billingAnchorDate,
+      message,
+    });
+    if (outcome === "sent") sent += 1;
+    else if (outcome === "failed") failed += 1;
+    else skipped += 1;
   }
 
   return { sent, skipped, failed, disabled: false };

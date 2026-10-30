@@ -262,6 +262,7 @@ export function VPSControl({
   onBackupRestoreStarted,
   powerLocked = false,
   powerLockedTitle,
+  liveStatus,
 }: {
   orderId: string;
   /** Two grid cells (e.g. Reinstall + Delete), equal width inside {@link VPSControl}. */
@@ -276,6 +277,11 @@ export function VPSControl({
   /** When true, power actions and console are disabled (e.g. plan change in progress). */
   powerLocked?: boolean;
   powerLockedTitle?: string;
+  /**
+   * Power state from the shared cluster snapshot.
+   * Omit the per-VM poll; `undefined` leaves buttons waiting, `null` means not running.
+   */
+  liveStatus?: string | null;
 }) {
   const { user } = useAuth();
   const [loading, setLoading] = useState<Action | null>(null);
@@ -301,16 +307,30 @@ export function VPSControl({
     return null;
   }, [orderId]);
 
-  const refreshPowerStatus = useCallback(async () => {
-    const s = await fetchPowerStatus();
-    if (s) setVmPowerStatus(s);
-  }, [fetchPowerStatus]);
+  const liveStatusAtActionStart = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
-    void refreshPowerStatus();
-    const id = setInterval(() => void refreshPowerStatus(), 15_000);
-    return () => clearInterval(id);
-  }, [refreshPowerStatus]);
+    if (loading !== null) {
+      liveStatusAtActionStart.current = liveStatus;
+      return;
+    }
+    if (
+      liveStatusAtActionStart.current !== undefined &&
+      liveStatus === liveStatusAtActionStart.current
+    ) {
+      return;
+    }
+    liveStatusAtActionStart.current = undefined;
+    if (
+      liveStatus === "running" ||
+      liveStatus === "stopped" ||
+      liveStatus === "paused"
+    ) {
+      setVmPowerStatus(liveStatus);
+    } else if (liveStatus === null) {
+      setVmPowerStatus(null);
+    }
+  }, [liveStatus, loading]);
 
   async function runAction(action: Action) {
     if (!user || powerLocked) return;
