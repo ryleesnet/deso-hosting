@@ -12,7 +12,7 @@ import {
   effectiveSubscriptionStatus,
 } from "@/lib/billing";
 import { fetchDesoUsernamesByPublicKeys } from "@/lib/deso-profile";
-import { suspendAfterPastDueDays, runBillingDunningIfDue } from "@/lib/order-lifecycle";
+import { suspendAfterPastDueDays } from "@/lib/order-lifecycle";
 import type { Order, Subscription } from "@/lib/db";
 import { requireUser } from "@/lib/api-auth";
 
@@ -67,9 +67,6 @@ export async function GET(req: NextRequest) {
   if (wantAll && !auth.isAdmin) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });
   }
-
-  // Dunning has its own scheduler. Never block the order list on it.
-  runBillingDunningIfDue();
 
   const [subs, orders] = await Promise.all([
     wantAll ? getSubscriptions() : getSubscriptionsByUser(auth.publicKey),

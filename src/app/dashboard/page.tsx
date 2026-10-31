@@ -78,6 +78,11 @@ type HostedCatalogProfile = {
   imageFile?: string;
 };
 
+/** While a VM is provisioning or in hardware maintenance, refresh that order only. */
+const ORDER_STATUS_POLL_MS = 15_000;
+/** Stop even if a flag was never cleared (stuck provision or a dead background job). */
+const ORDER_STATUS_POLL_MAX_MS = 70 * 60 * 1000;
+
 function DashboardSection({
   title,
   titleId,
@@ -205,13 +210,23 @@ export default function DashboardPage() {
     loadData();
   }, [loadData]);
 
+  const liveIdsKey = orders
+    .filter((o) => o.vmid > 0 && o.status !== "cancelled")
+    .map((o) => o.id)
+    .join(",");
+
   useEffect(() => {
-    if (!user) return;
+    if (!user || loading) return;
+    if (!liveIdsKey) {
+      setVmLiveReady(true);
+      return;
+    }
     let cancelled = false;
 
     async function loadLive() {
       try {
-        const res = await apiFetch("/api/vm/live");
+        const params = new URLSearchParams({ ids: liveIdsKey });
+        const res = await apiFetch(`/api/vm/live?${params.toString()}`);
         const data = (await res.json()) as {
           byOrderId?: Record<string, { name: string | null; status: string | null }>;
         };
@@ -233,18 +248,69 @@ export default function DashboardPage() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [user]);
+  }, [user, loading, liveIdsKey]);
 
   const hasProvisioningOrder = orders.some((o) => o.status === "provisioning");
   const hasAsyncVmMaintenance = orders.some(
     (o) => o.adjustingPlan || o.hardwareMaintenance || o.backupRestoreInProgress
   );
+  const statusWatchKey = orders
+    .filter(
+      (o) =>
+        o.status === "provisioning" ||
+        o.adjustingPlan ||
+        o.hardwareMaintenance ||
+        o.backupRestoreInProgress
+    )
+    .map((o) => o.id)
+    .sort()
+    .join(",");
 
   useEffect(() => {
-    if (!user || !(hasProvisioningOrder || hasAsyncVmMaintenance)) return;
-    const t = setInterval(() => loadOrdersOnly(), 3000);
-    return () => clearInterval(t);
-  }, [user, hasProvisioningOrder, hasAsyncVmMaintenance, loadOrdersOnly]);
+    if (!user || !statusWatchKey) return;
+    const ids = statusWatchKey.split(",");
+    let stopped = false;
+    const startedAt = Date.now();
+
+    async function tick() {
+      if (stopped || Date.now() - startedAt > ORDER_STATUS_POLL_MAX_MS) return;
+      const results = await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const res = await apiFetch(`/api/orders/${id}`);
+            if (!res.ok) return null;
+            return (await res.json()) as Order & { billing?: BillingInfo | null };
+          } catch (err) {
+            console.error("[dashboard] order poll failed", id, err);
+            return null;
+          }
+        })
+      );
+      if (stopped) return;
+      setOrders((prev) => {
+        let changed = false;
+        const next = prev.map((o) => {
+          const fresh = results.find((row) => row && row.id === o.id);
+          if (!fresh) return o;
+          changed = true;
+          return { ...o, ...fresh, billing: o.billing ?? null };
+        });
+        return changed ? next : prev;
+      });
+    }
+
+    const timer = setInterval(() => {
+      if (Date.now() - startedAt > ORDER_STATUS_POLL_MAX_MS) {
+        clearInterval(timer);
+        return;
+      }
+      void tick();
+    }, ORDER_STATUS_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [user, statusWatchKey]);
 
   if (!user) {
     return (
@@ -282,9 +348,9 @@ export default function DashboardPage() {
               aria-live="polite"
             >
               {hasProvisioningOrder && !hasAsyncVmMaintenance
-                ? "Provisioning in progress — list refreshes every few seconds."
+                ? "Provisioning in progress — this server refreshes about every 15 seconds."
                 : hasProvisioningOrder && hasAsyncVmMaintenance
-                  ? "Provisioning or hardware changes running — list refreshes every few seconds."
+                  ? "Provisioning or hardware changes running — this list refreshes about every 15 seconds."
                   : "Hardware change running (plan resize, disks, or backup restore) — VM may be off briefly."}
             </p>
           ) : null}

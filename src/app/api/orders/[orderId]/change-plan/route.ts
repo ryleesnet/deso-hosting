@@ -117,6 +117,7 @@ export async function POST(
 
     await updateOrder(orderId, {
       adjustingPlan: true,
+      asyncJobStartedAt: new Date().toISOString(),
       provisionError: "",
     });
 
@@ -129,7 +130,10 @@ export async function POST(
           console.error(`[orders/${orderId}/change-plan]`, err);
           await updateOrder(orderId, { provisionError: msg });
         } finally {
-          await updateOrder(orderId, { adjustingPlan: false });
+          await updateOrder(orderId, {
+            adjustingPlan: false,
+            asyncJobStartedAt: "",
+          });
         }
       })();
     });

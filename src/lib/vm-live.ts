@@ -6,6 +6,8 @@
 import { updateOrder, type Order } from "@/lib/db";
 import { getClusterResources } from "@/lib/proxmox";
 
+export type LiveOrderRef = Pick<Order, "id" | "vmid" | "node" | "status">;
+
 export type VmLiveStatus = "running" | "stopped" | "paused";
 
 export type VmLiveRow = {
@@ -24,7 +26,7 @@ function normalizeLiveStatus(raw: string | undefined): VmLiveStatus | null {
  * When a VM has been migrated, the stored node is updated in the background.
  */
 export async function snapshotVmsForOrders(
-  orders: Order[]
+  orders: LiveOrderRef[]
 ): Promise<Record<string, VmLiveRow>> {
   const tracked = orders.filter((o) => o.vmid > 0 && o.status !== "cancelled");
   const out: Record<string, VmLiveRow> = {};

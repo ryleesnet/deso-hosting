@@ -142,6 +142,12 @@ export interface Order {
   /** Set while a vzdump backup restore runs (stop → restore → start). */
   backupRestoreInProgress?: boolean;
   /**
+   * When a plan change, disk change, or backup restore started.
+   * The status poll clears those flags if this is older than the maintenance limit,
+   * so a crashed background job cannot keep the dashboard reading Firestore.
+   */
+  asyncJobStartedAt?: string;
+  /**
    * Payment rail used to place this order. Absent on legacy DESO-only orders.
    * "paypal" means recurring billing is handled off-chain by PayPal (see
    * `paypalSubscriptionId`); everything else uses DeSo Identity transfers.
@@ -178,6 +184,55 @@ export interface Subscription {
 
 function db() {
   return getFirestoreDb();
+}
+
+/**
+ * Orders this process has already loaded. The dashboard power poll uses it so
+ * `/api/vm/live` can ask Proxmox without reading Firestore again.
+ */
+const ownedVmCache = new Map<
+  string,
+  { userId: string; vmid: number; node: string; status: Order["status"] }
+>();
+
+function rememberOrderVm(order: Order) {
+  ownedVmCache.set(order.id, {
+    userId: order.userId,
+    vmid: order.vmid,
+    node: order.node,
+    status: order.status,
+  });
+}
+
+function forgetOrderVm(orderId: string) {
+  ownedVmCache.delete(orderId);
+}
+
+/**
+ * Order identity for the Proxmox power poll. Cache hits do not touch Firestore.
+ * A miss reads that one order and caches it.
+ */
+export async function getOrderForLiveStatus(
+  orderId: string,
+  userId: string
+): Promise<
+  | { id: string; userId: string; vmid: number; node: string; status: Order["status"] }
+  | undefined
+> {
+  const cached = ownedVmCache.get(orderId);
+  if (cached) {
+    if (cached.userId !== userId) return undefined;
+    return { id: orderId, ...cached };
+  }
+  const order = await getOrder(orderId);
+  if (!order || order.userId !== userId) return undefined;
+  return {
+    id: order.id,
+    userId: order.userId,
+    vmid: order.vmid,
+    node: order.node,
+    status: order.status,
+  };
 }
 
 /** Removes undefined (Firestore rejects undefined field values). */
@@ -254,6 +309,7 @@ export async function deleteService(id: string): Promise<void> {
 export async function getOrders(): Promise<Order[]> {
   const snap = await db().collection(COL_ORDERS).get();
   const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Order);
+  for (const order of list) rememberOrderVm(order);
   return list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
 }
 
@@ -263,6 +319,7 @@ export async function getOrdersByUser(userId: string): Promise<Order[]> {
     .where("userId", "==", userId)
     .get();
   const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Order);
+  for (const order of list) rememberOrderVm(order);
   return list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
 }
 
@@ -270,6 +327,26 @@ export async function getOrder(id: string): Promise<Order | undefined> {
   const doc = await db().collection(COL_ORDERS).doc(id).get();
   if (!doc.exists) return undefined;
   const order = { id: doc.id, ...doc.data() } as Order;
+  rememberOrderVm(order);
+  attachOrderLogContext(order);
+  return order;
+}
+
+/** One order for a PayPal Billing Subscription id. Single-field equality; at most one read. */
+export async function getOrderByPaypalSubscriptionId(
+  subscriptionId: string
+): Promise<Order | undefined> {
+  const id = subscriptionId.trim();
+  if (!id) return undefined;
+  const snap = await db()
+    .collection(COL_ORDERS)
+    .where("paypalSubscriptionId", "==", id)
+    .limit(1)
+    .get();
+  if (snap.empty) return undefined;
+  const d = snap.docs[0];
+  const order = { id: d.id, ...d.data() } as Order;
+  rememberOrderVm(order);
   attachOrderLogContext(order);
   return order;
 }
@@ -286,6 +363,7 @@ export async function addOrder(
     .collection(COL_ORDERS)
     .doc(newOrder.id)
     .set(forFirestore(newOrder));
+  rememberOrderVm(newOrder);
   attachOrderLogContext(newOrder);
   return newOrder;
 }
@@ -302,7 +380,9 @@ export async function updateOrder(
     { merge: true }
   );
   const after = await ref.get();
-  return { id: after.id, ...after.data() } as Order;
+  const updated = { id: after.id, ...after.data() } as Order;
+  rememberOrderVm(updated);
+  return updated;
 }
 
 // Subscriptions
@@ -371,6 +451,7 @@ export async function deleteSubscription(id: string): Promise<void> {
 
 export async function deleteOrder(id: string): Promise<void> {
   await db().collection(COL_ORDERS).doc(id).delete();
+  forgetOrderVm(id);
 }
 
 /** Processed renewal payments (idempotency store; doc id = tx hash hex OR `paypal_<sale.id>`). */

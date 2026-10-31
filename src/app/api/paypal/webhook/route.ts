@@ -30,10 +30,10 @@ import {
   getRenewalTxByHash,
   getService,
   getSubscriptionByOrder,
+  getOrderByPaypalSubscriptionId,
   recordPaypalEventIfNew,
   updateOrder,
   updateSubscription,
-  type Order,
 } from "@/lib/db";
 import {
   getPaypalSubscription,
@@ -48,17 +48,8 @@ import { attachOrderLogContext, logWarn } from "@/lib/app-log";
 // PayPal webhook payloads occasionally include large stringified data, but
 // we keep them tight in memory by reading once as text.
 
-async function findOrderBySubscriptionId(
-  subscriptionId: string
-): Promise<Order | undefined> {
-  // We don't have a Firestore index on paypalSubscriptionId, so scan the
-  // caller's orders via the collection group. Volumes are small (per user),
-  // and this only runs on webhook — call sites are rare.
-  const { getOrders } = await import("@/lib/db");
-  const orders = await getOrders();
-  const order = orders.find((o) => o.paypalSubscriptionId === subscriptionId);
-  if (order) attachOrderLogContext(order);
-  return order;
+async function findOrderBySubscriptionId(subscriptionId: string) {
+  return getOrderByPaypalSubscriptionId(subscriptionId);
 }
 
 export async function POST(req: NextRequest) {

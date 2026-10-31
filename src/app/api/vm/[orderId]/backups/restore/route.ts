@@ -103,6 +103,7 @@ export async function POST(
     await updateOrder(orderId, {
       hardwareMaintenance: true,
       backupRestoreInProgress: true,
+      asyncJobStartedAt: new Date().toISOString(),
       provisionError: "",
     });
 
@@ -123,6 +124,7 @@ export async function POST(
           await updateOrder(oid, {
             hardwareMaintenance: false,
             backupRestoreInProgress: false,
+            asyncJobStartedAt: "",
           });
         }
       })();

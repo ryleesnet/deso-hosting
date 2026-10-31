@@ -26,7 +26,6 @@ export function suspendAfterPastDueDays(): number {
   return Number.isFinite(n) && n > 0 ? n : 30;
 }
 
-let lastDunningRunAt = 0;
 let dunningInFlight: Promise<DunningResult> | null = null;
 
 type DunningResult = {
@@ -35,22 +34,15 @@ type DunningResult = {
   billingDms: Awaited<ReturnType<typeof sendBillingDmNotifications>>;
 };
 
-function dunningMinIntervalMs(): number {
-  const raw = process.env.BILLING_DUNNING_MIN_INTERVAL_MS?.trim();
-  const n = raw ? parseInt(raw, 10) : 300_000; // 5 min default
-  return Number.isFinite(n) && n > 0 ? n : 300_000;
-}
-
 /**
  * Mark overdue subs past_due, suspend VPS past grace, and send billing DMs.
  * Overlapping callers share one in-flight run.
+ * Started from the process timer in `instrumentation.ts` and from
+ * `POST /api/cron/billing-dunning`. Page loads do not call this.
  */
 export function runBillingDunning(): Promise<DunningResult> {
   if (dunningInFlight) return dunningInFlight;
-  const run = runBillingDunningOnce().then((result) => {
-    lastDunningRunAt = Date.now();
-    return result;
-  });
+  const run = runBillingDunningOnce();
   dunningInFlight = run;
   void run
     .finally(() => {
@@ -66,19 +58,6 @@ async function runBillingDunningOnce(): Promise<DunningResult> {
   const { suspended } = await autoSuspendDelinquentOrders(orders, subs);
   const billingDms = await sendBillingDmNotifications(orders, subs);
   return { markedPastDue, suspendedOrderIds: suspended, billingDms };
-}
-
-/**
- * Schedule dunning without blocking the caller. Page loads use this so a
- * Proxmox/DeSo scan never sits on the dashboard or admin response.
- */
-export function runBillingDunningIfDue(): void {
-  if (dunningInFlight) return;
-  if (Date.now() - lastDunningRunAt < dunningMinIntervalMs()) return;
-  lastDunningRunAt = Date.now();
-  void runBillingDunning().catch((err) => {
-    console.error("[billing-dunning]", err);
-  });
 }
 
 export { effectiveSubscriptionStatus, isPaymentOverdue };

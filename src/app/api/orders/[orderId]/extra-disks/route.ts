@@ -122,6 +122,7 @@ export async function POST(
 
     await updateOrder(orderId, {
       hardwareMaintenance: true,
+      asyncJobStartedAt: new Date().toISOString(),
       provisionError: "",
     });
 
@@ -141,7 +142,10 @@ export async function POST(
           console.error(`[orders/${oid}/extra-disks]`, err);
           await updateOrder(oid, { provisionError: msg });
         } finally {
-          await updateOrder(oid, { hardwareMaintenance: false });
+          await updateOrder(oid, {
+            hardwareMaintenance: false,
+            asyncJobStartedAt: "",
+          });
         }
       })();
     });
